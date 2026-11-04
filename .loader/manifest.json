@@ -1,0 +1,123 @@
+{
+  "manifest_version": "0.3",
+  "name": "edoc",
+  "display_name": "იდოკი (eDocument)",
+  "version": "3.1.0",
+  "description": "ილიაუნის eDocument (იდოკი) — ჩამტვირთავი. ხელსაწყოების კოდს კითხულობს კომპიუტერის საქაღალდიდან (ნაგულისხმევად Documents\\edoc-mcp), ასე რომ კოდის შეცვლა ხელახლა დაყენებას არ საჭიროებს. საჭიროებისას თავად რთავს VPN-ს (FortiClient).",
+  "author": {
+    "name": "Paata Gogishvili"
+  },
+  "server": {
+    "type": "node",
+    "entry_point": "server/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": [
+        "${__dirname}/server/index.js"
+      ],
+      "env": {
+        "EDOC_LOGIN": "${user_config.login}",
+        "EDOC_PASSWORD": "${user_config.password}",
+        "EDOC_BASE_URL": "${user_config.base_url}",
+        "VPN_PROFILE": "${user_config.vpn_profile}",
+        "VPN_AUTO": "${user_config.vpn_auto}",
+        "EDOC_CODE_DIR": "${user_config.code_dir}"
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "edoc_list_tasks",
+      "description": "ბოლო N დავალება იდოკიდან"
+    },
+    {
+      "name": "edoc_list_vises",
+      "description": "დასავიზებელი დოკუმენტები"
+    },
+    {
+      "name": "edoc_vise",
+      "description": "დოკუმენტის დავიზება (დადასტურებით)"
+    },
+    {
+      "name": "edoc_list_signs",
+      "description": "ხელმოსაწერი დოკუმენტები"
+    },
+    {
+      "name": "edoc_ignore",
+      "description": "ignore-list: დასავიზებელი/ხელმოსაწერი, რომლებიც აღარ უნდა ჩანდეს მოლოდინში"
+    },
+    {
+      "name": "edoc_sign",
+      "description": "დოკუმენტზე ხელის მოწერა (დადასტურებით)"
+    },
+    {
+      "name": "vpn_connect",
+      "description": "ილიაუნის VPN-ის ჩართვა"
+    },
+    {
+      "name": "edoc_discover",
+      "description": "სერვისის მეთოდების ძებნა (დიაგნოსტიკა)"
+    },
+    {
+      "name": "edoc_wsdl_types",
+      "description": "სერვისის ტიპები (დიაგნოსტიკა)"
+    },
+    {
+      "name": "edoc_reload",
+      "description": "კოდის ხელახლა ჩატვირთვა"
+    }
+  ],
+  "user_config": {
+    "login": {
+      "type": "string",
+      "title": "იდოკის მომხმარებელი",
+      "description": "როგორც შესვლის ფორმაში წერთ (მაგ. პ.გოგიშვილი)",
+      "required": true
+    },
+    "password": {
+      "type": "string",
+      "title": "იდოკის პაროლი",
+      "sensitive": true,
+      "required": true,
+      "description": "იდოკის პაროლი"
+    },
+    "base_url": {
+      "type": "string",
+      "title": "იდოკის მისამართი",
+      "default": "http://edoc.uninet.local",
+      "required": false,
+      "description": "ჩვეულებრივ არ იცვლება"
+    },
+    "vpn_profile": {
+      "type": "string",
+      "title": "FortiClient-ის VPN პროფილი",
+      "default": "vpn.iliauni.edu.ge",
+      "required": false,
+      "description": "VPN Name ველის მნიშვნელობა"
+    },
+    "vpn_auto": {
+      "type": "boolean",
+      "title": "VPN-ის ავტომატური ჩართვა",
+      "default": true,
+      "required": false,
+      "description": "იდოკი თუ მიუწვდომელია, VPN თავად ჩაირთოს"
+    },
+    "code_dir": {
+      "type": "string",
+      "title": "კოდის საქაღალდე (არასავალდებულო)",
+      "description": "ცარიელი = ავტომატურად: Google Drive-ის My Drive\\AI-transform\\edoc-mcp, თუ არ არის — Documents\\edoc-mcp.",
+      "default": "",
+      "required": false
+    }
+  },
+  "compatibility": {
+    "platforms": [
+      "win32",
+      "darwin"
+    ],
+    "runtimes": {
+      "node": ">=18.0.0"
+    }
+  },
+  "tools_generated": true
+}

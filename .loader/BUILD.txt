@@ -1,0 +1,6 @@
+ჩამტვირთავის (.mcpb) აწყობა
+1. საქაღალდე: manifest.json, package.json, server/index.js (აქედან), server/seed/ = ახლანდელი tools.js, vpn.js, README.txt.
+2. node_modules: `npm install @modelcontextprotocol/sdk@1.32.2 zod@3` (package.json-ის მიხედვით: npm install).
+3. manifest.json-ში version გაზარდე; server/index.js-ში LOADER_VERSION.
+4. ტესტი: `node server/index.js` (EDOC_CODE_DIR=<ტესტის საქაღალდე>, VPN_AUTO=false) + MCP initialize / tools/list / tools/call edoc_reload stdin-ით.
+5. zip -r -X edoc-<ver>.mcpb manifest.json package.json server node_modules  → .dist/-ში.
