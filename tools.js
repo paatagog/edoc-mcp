@@ -4,7 +4,7 @@
 import { createEdoc } from "./core/edoc.js";
 import { defaultIgnoreFile } from "./core/ignore.js";
 
-export const VERSION = "3.1.0";
+export const VERSION = "3.2.0";
 
 const edoc = createEdoc({
   base: process.env.EDOC_BASE_URL,
@@ -134,6 +134,35 @@ export default function defineTools({ z }) {
         annotations: DESTRUCTIVE,
       },
       handler: wrap(({ target, comment, confirm }) => edoc.sign({ target, comment, confirm })),
+    },
+    {
+      name: "edoc_create_task",
+      config: {
+        title: "იდოკი — ახალი დავალების (მოხსენებითის) შექმნა",
+        description: "Creates a new internal eDocument task (e.g. a memo / მოხსენებითი ბარათი) and sends it for signature: task title, addressee(s), " +
+          "files from this computer (first/kind=main must be a Word .doc/.docx; others are attachments), signatory (default: the user, own main position). " +
+          "No visa authors yet. Addressees: \"surname [first name] [| part of position]\"; one on leave is replaced by their delegate (reported). " +
+          "Without confirm=true it only resolves people/files and returns a preview — nothing is created. With confirm=true it creates the task in eDocument " +
+          "(cannot be deleted by these tools) and puts it into the signatory's signature list; it reaches the addressee only after signing (edoc_sign). " +
+          "Only call with confirm=true after the user explicitly approved this exact preview.",
+        inputSchema: {
+          title: z.string().min(1).describe("დავალების სათაური (მაგ. „ABET-ის ინვოისის გადახდა“)"),
+          addressees: z.array(z.string().min(1)).min(1).describe("ადრესატები: „გვარი [სახელი] [| თანამდებობის ნაწილი]“"),
+          files: z.array(z.object({
+            path: z.string().min(1).describe("ფაილის სრული გზა ამ კომპიუტერზე"),
+            kind: z.enum(["main", "attachment"]).optional().describe("main = ძირითადი (Word), attachment = დანართი; ნაგულისხმევად პირველი main"),
+            name: z.string().optional().describe("სახელი იდოკში (ნაგულისხმევად ფაილის სახელი)"),
+          })).min(1),
+          signer: z.string().optional().describe("ხელმომწერი, თუ თავად მომხმარებელი არ არის: „გვარი სახელი [| თანამდებობა]“"),
+          signer_position: z.string().optional().describe("საკუთარი თანამდებობის ნაწილი, თუ რამდენიმე გაქვს (მაგ. „დირექტორი“)"),
+          deadline_days: z.number().int().min(1).max(365).default(14),
+          comment: z.string().optional().describe("დავალების კომენტარი"),
+          confirm: z.boolean().default(false).describe("true — მართლა შექმნას; false — მხოლოდ preview"),
+        },
+        annotations: DESTRUCTIVE,
+      },
+      handler: wrap(({ title, addressees, files, signer, signer_position, deadline_days, comment, confirm }) =>
+        edoc.createTask({ title, addressees, files, signer, signerPosition: signer_position, deadlineDays: deadline_days, comment, confirm })),
     },
     {
       name: "vpn_connect",

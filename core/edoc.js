@@ -5,6 +5,8 @@
 // ამიტომ ყველა ადაპტერი მათ ავტომატურად იღებს.
 import { ensureVpn, edocReachable } from "./vpn.js";
 import { createIgnoreStore } from "./ignore.js";
+import fs from "node:fs";
+import path from "node:path";
 
 export class EdocError extends Error {
   constructor(message, data) { super(message); this.data = data; }
@@ -222,7 +224,9 @@ export function createEdoc(cfg = {}) {
     }
     const u = az.UserInfo;
     const positionIDs = Array.isArray(u.Positions) && u.Positions.length ? u.Positions.map((p) => p.PositionID) : [u.PositionID].filter(Boolean);
-    session = { credential: c, employeeID: u.EmployeeID, positionIDs, fullName: u.FullName || [u.LastName, u.FirstName].filter(Boolean).join(" ") };
+    session = { credential: c, employeeID: u.EmployeeID, positionIDs, positionID: u.PositionID || positionIDs[0] || null,
+      lastName: u.LastName || null, firstName: u.FirstName || null,
+      fullName: u.FullName || [u.LastName, u.FirstName].filter(Boolean).join(" ") };
     log("შესვლა წარმატებულია:", session.fullName);
     return session;
   }
@@ -444,11 +448,214 @@ export function createEdoc(cfg = {}) {
     return { ok: false, error: "action უნდა იყოს list, add ან remove" };
   }
 
+  // ---------- ახალი დავალება (მოხსენებითი) — შექმნა და ხელმოსაწერად გაგზავნა ----------
+  // თანმიმდევრობა ჩაწერილია ვებ-აპლიკაციიდან (2026-11-12, დავალებები 52346/52355):
+  // saveTask → CreateTaskWorkingFolder → ფაილები (TaskWorkingFilesUploadHandler.ashx) → CheckTaskWorkingFolderIsEditable →
+  // CreateTaskWorkingFolderInternalContact (ადრესატი) → SaveTaskSignatoryChanges (ხელმომწერი).
+  // ამის შემდეგ დოკუმენტი ხელმომწერის „ხელმოსაწერებში“ ჩნდება; ადრესატთან მიდის ხელმოწერის (edoc_sign) შემდეგ.
+  const FOLDER_TEMPLATE_ID = "e8b991b5-6e68-e611-8bf6-000c294b1e9c"; // ვებ-აპლიკაციის ნაგულისხმევი („ცარიელი“) შაბლონი
+  const DOC_TYPE_INTERNAL = 3;
+  const FILE_MAIN = 1, FILE_ATTACHMENT = 2;
+  const MAX_FILE = 25 * 1024 * 1024;
+  const dateMs = (ms) => `/Date(${ms})/`;
+  const empShape = (e) => ({
+    name: clean(e.EmployeeInfo || [e.EmployeeLastName, e.EmployeeFirstName].filter(Boolean).join(" ")),
+    position: clean(e.PositionTypeName), unit: clean(e.OrgStructureName),
+    employee_id: e.EmployeeID, position_id: e.PositionID,
+    delegate: e.DelegateEmployeeID ? { name: clean(e.DelegateInfo || [e.DelegateEmployeeLastName, e.DelegateEmployeeFirstName].filter(Boolean).join(" ")),
+      position: clean(e.DelegatePositionTypeName), from: wcfDate(e.DelegatePeriodStart), to: wcfDate(e.DelegatePeriodEnd) } : null,
+  });
+
+  async function findEmployees(prefix) {
+    const r = await call("ListEmployeesForUser", { userID: null, prefix, loadAllPositions: false, periodStart: null, periodEnd: null,
+      loadOrganisations: true, loadScopeEmployees: true });
+    return (r.Items || []).filter((e) => e.EmployeeID && e.PositionID && e.IsActive !== false);
+  }
+  // „გვარი [სახელი] [| თანამდებობის ნაწილი]“ → ზუსტად ერთი თანამშრომელი+თანამდებობა
+  async function resolvePerson(spec) {
+    const [who, pos] = String(spec || "").split("|").map((x) => x.trim());
+    const words = (who || "").split(/\s+/).filter(Boolean);
+    if (!words.length) return { error: "ცარიელი სახელი" };
+    let list = await findEmployees(words[0].length > 3 ? words[0].slice(0, -1) : words[0]);
+    const low = (x) => (x || "").toLowerCase();
+    list = list.filter((e) => words.every((w) => low(`${e.EmployeeLastName} ${e.EmployeeFirstName}`).includes(low(w).replace(/ს$/, ""))));
+    if (pos) list = list.filter((e) => low(`${e.PositionTypeName} ${e.OrgStructureName}`).includes(low(pos)));
+    const uniq = [...new Map(list.map((e) => [`${e.EmployeeID}/${e.PositionID}`, e])).values()];
+    if (uniq.length !== 1) return { error: uniq.length ? `„${spec}“ რამდენიმეს ემთხვევა — დაამატე „| თანამდებობის ნაწილი“` : `„${spec}“ ვერ მოიძებნა`,
+      candidates: uniq.slice(0, 10).map(empShape) };
+    return { emp: uniq[0] };
+  }
+  async function selfEmployee(positionHint) {
+    const s = await me();
+    let list = (await findEmployees(s.lastName || (s.fullName || "").split(" ")[0])).filter((e) => e.EmployeeID === s.employeeID);
+    if (positionHint) list = list.filter((e) => (`${e.PositionTypeName} ${e.OrgStructureName}`).toLowerCase().includes(positionHint.toLowerCase()));
+    const pick = list.find((e) => e.PositionID === s.positionID) || list[0];
+    if (!pick) throw new EdocError("საკუთარი თანამდებობა ვერ განისაზღვრა" + (positionHint ? ` („${positionHint}“)` : ""));
+    return pick;
+  }
+  function checkFiles(files) {
+    if (!Array.isArray(files) || !files.length) return { error: "მიუთითე მინიმუმ ერთი ფაილი (ძირითადი — Word)" };
+    const out = [];
+    files.forEach((f, i) => {
+      const p = typeof f === "string" ? f : f.path;
+      const kind = (typeof f === "object" && f.kind) || (i === 0 ? "main" : "attachment");
+      if (!p) { out.push({ error: `ფაილი #${i + 1}: გზა არ არის` }); return; }
+      let st; try { st = fs.statSync(p); } catch { out.push({ path: p, error: "ფაილი ვერ მოიძებნა" }); return; }
+      if (!st.isFile()) { out.push({ path: p, error: "ფაილი არ არის" }); return; }
+      if (st.size > MAX_FILE) { out.push({ path: p, error: "ფაილი 25 MB-ზე დიდია" }); return; }
+      const name = (typeof f === "object" && f.name) || path.basename(p);
+      if (kind === "main" && !/\.docx?$/i.test(name)) { out.push({ path: p, error: "ძირითადი ფაილი Word (.doc/.docx) უნდა იყოს" }); return; }
+      out.push({ path: p, name, kind, type: kind === "main" ? FILE_MAIN : FILE_ATTACHMENT, size: st.size });
+    });
+    const bad = out.filter((x) => x.error);
+    if (bad.length) return { error: "ფაილების შეცდომა", files: out };
+    if (out.filter((x) => x.kind === "main").length !== 1) return { error: "ზუსტად ერთი ძირითადი (main) ფაილი უნდა იყოს", files: out };
+    return { files: [...out.filter((x) => x.kind === "main"), ...out.filter((x) => x.kind !== "main")] };
+  }
+  async function uploadFile(taskID, folderID, f) {
+    const c = session.credential;
+    const fd = new FormData();
+    fd.append("DocumentFile", new Blob([fs.readFileSync(f.path)]), f.name);
+    fd.append("UserSessionID", c.UserSessionID); fd.append("ClientVersionID", c.ClientVersionID || CLIENT_VERSION);
+    fd.append("ServiceVersionID", c.ServiceVersionID || ""); fd.append("UserID", c.UserID);
+    fd.append("TaskID", taskID); fd.append("FolderID", folderID);
+    fd.append("TaskWorkingDocumentType", String(f.type)); fd.append("DocumentText", "");
+    fd.append("DocumentName", f.name); fd.append("Comment", ""); fd.append("IsImportedFromDRS", "false");
+    let res;
+    try { res = await fetch(`${BASE}/spaService/Pages/TaskWorkingFiles/TaskWorkingFilesUploadHandler.ashx`, { method: "POST", body: fd, signal: AbortSignal.timeout(120000) }); }
+    catch (e) { throw new EdocError(`ფაილის ატვირთვა (${f.name}): ${e.cause?.code || e.message}`); }
+    if (!res.ok) throw new EdocError(`ფაილის ატვირთვა (${f.name}): HTTP ${res.status}`);
+    let j; try { j = await res.json(); } catch { throw new EdocError(`ფაილის ატვირთვა (${f.name}): გაუგებარი პასუხი`); }
+    if (!j || j.SaveResult !== true) throw new EdocError(`ფაილის ატვირთვა (${f.name}): ${j?.SaveResultComments || "უარი"}`);
+    return j.ID;
+  }
+
+  /**
+   * ახალი შიდა დავალება/მოხსენებითი: ადრესატ(ებ)ი + ფაილები + ხელმომწერი (ნაგულისხმევად — თავად მომხმარებელი).
+   * confirm=false → მხოლოდ შემოწმება და preview (იდოკში არაფერი იქმნება).
+   * confirm=true → ქმნის და აგზავნის ხელმოსაწერად; ადრესატთან მიდის მხოლოდ ხელმოწერის შემდეგ (edoc_sign).
+   */
+  async function createTask({ title, addressees = [], files = [], signer, signerPosition, viseAuthors = [], deadlineDays = 14, comment, confirm = false } = {}) {
+    const s = await me();
+    const text = clean(title);
+    if (!text) return { ok: false, error: "მიუთითე დავალების სათაური (title)" };
+    if (viseAuthors && viseAuthors.length) return { ok: false, error: "ვიზირება (vise_authors) ჯერ არ არის მხარდაჭერილი — შექმენი ვიზირების გარეშე ან დაამატე ვიზიორი იდოკში ხელით" };
+    if (!Array.isArray(addressees) || !addressees.length) return { ok: false, error: "მიუთითე მინიმუმ ერთი ადრესატი" };
+    const fc = checkFiles(files);
+    if (fc.error) return { ok: false, error: fc.error, files: fc.files };
+
+    const resolved = [], problems = [], notes = [];
+    for (const a of addressees) {
+      const r = await resolvePerson(a);
+      if (r.error) { problems.push({ addressee: a, error: r.error, candidates: r.candidates }); continue; }
+      let emp = r.emp;
+      if (emp.DelegateEmployeeID) {
+        const d = (await findEmployees((emp.DelegateEmployeeLastName || "").slice(0, -1) || emp.DelegateEmployeeLastName))
+          .find((e) => e.EmployeeID === emp.DelegateEmployeeID && (!emp.DelegatePositionID || e.PositionID === emp.DelegatePositionID));
+        if (d) { notes.push(`${empShape(emp).name} — შვებულებაშია; ადრესატად ჩაიწერა შემცვლელი: ${empShape(d).name}`); emp = d; }
+        else problems.push({ addressee: a, error: "შვებულებაშია, შემცვლელი ვერ მოიძებნა", person: empShape(emp) });
+      }
+      resolved.push(emp);
+    }
+    if (problems.length) return { ok: false, error: "ადრესატი ვერ განისაზღვრა ცალსახად", problems };
+
+    let signEmp;
+    if (signer) { const r = await resolvePerson(signer); if (r.error) return { ok: false, error: `ხელმომწერი: ${r.error}`, candidates: r.candidates }; signEmp = r.emp; }
+    else signEmp = await selfEmployee(signerPosition);
+    const creator = await selfEmployee(signerPosition);
+
+    const preview = {
+      title: text, comment: clean(comment), deadline_days: deadlineDays,
+      addressees: resolved.map(empShape), signer: empShape(signEmp), vise_authors: [],
+      files: fc.files.map((f) => ({ name: f.name, kind: f.kind === "main" ? "ძირითადი" : "დანართი", size: f.size })),
+      creator: empShape(creator),
+    };
+    if (notes.length) preview.notes = notes;
+    if (!confirm) return { ok: true, dry_run: true, will_create: preview,
+      note: "არაფერი შექმნილა. შესაქმნელად და ხელმოსაწერად გასაგზავნად გამოიძახე იგივე confirm=true-ით. ადრესატთან წავა მხოლოდ ხელმოწერის შემდეგ." };
+
+    // ---- შექმნა ----
+    const done = { steps: [] };
+    const fail = (e) => ({ ok: false, error: e.message || String(e), partial: done,
+      note: "დავალება ნაწილობრივ შეიქმნა — დაასრულე ან გააუქმე იდოკში ხელით (ნომერი ზემოთ)." });
+    try {
+      const now = Date.now(), dl = now + Math.max(1, deadlineDays) * 86400000;
+      const st = await call("saveTask", {
+        task: { Priority: 1, TaskText: text, StartDate: dateMs(now), DeadlineDate: dateMs(dl), StartTime: null, Comments: clean(comment),
+          EditMode: 1, CreatorEmployeeID: creator.EmployeeID, CreatorPositionID: creator.PositionID, CurrentStatus: 1 },
+        responsibles: [{ EmployeeID: creator.EmployeeID, EmployeeFirstName: creator.EmployeeFirstName, EmployeeLastName: creator.EmployeeLastName,
+          PositionID: creator.PositionID, PositionTypeName: creator.PositionTypeName, OrgStructureID: creator.OrgStructureID,
+          OrgStructureName: creator.OrgStructureName, ResponsibleInfo: `${creator.EmployeeLastName} ${creator.EmployeeFirstName} - ${creator.PositionTypeName}`,
+          EditMode: 1, CurrentStatus: 1, Index: 1, ParentID: null, StartDate: dateMs(now), Deadline: dateMs(dl), TaskText: text, index: 0 }],
+      });
+      const T = st?.ResultTask;
+      const taskID = T?.ID || T?.RootID;
+      if (!taskID) throw new EdocError("saveTask: დავალების ID არ დაბრუნდა");
+      Object.assign(done, { task_id: taskID, task_number: T.Number != null ? String(T.Number) : null }); done.steps.push("task");
+
+      const cf = await call("CreateTaskWorkingFolder", {
+        taskWorkingFolder: { CreatedBy: s.credential.UserID, TaskID: taskID, CreatorEmployeeID: creator.EmployeeID, CreatorPositionID: creator.PositionID,
+          CreatorOrgStructureID: creator.OrgStructureID, Creator: `${creator.EmployeeLastName} ${creator.EmployeeFirstName}`, Status: 1,
+          DocumentType: DOC_TYPE_INTERNAL, Direction: null, EditMode: 1, IsPrive: false, SignAttachments: false, SignAllPagesOfMain: false,
+          SignAllPagesOfAttachments: false, RelationTypeID: 3, RelationType: 3, Name: text, TemplateID: FOLDER_TEMPLATE_ID, UseEmptyBlank: false,
+          DeadlineDate: null, CreateDate: dateMs(Date.now()), OrderType: null, IssueDecisionTypeID: null, IssueTopicID: null },
+        getRecipientList: false, systemClientsForExportIDs: "",
+      });
+      const folderID = cf?.ID;
+      if (!folderID) throw new EdocError("CreateTaskWorkingFolder: საქაღალდის ID არ დაბრუნდა");
+      done.folder_id = folderID; done.steps.push("folder");
+
+      done.files = [];
+      for (const f of fc.files) { const id = await uploadFile(taskID, folderID, f); done.files.push({ name: f.name, id, kind: f.kind }); }
+      done.steps.push("files");
+
+      const ed = await call("CheckTaskWorkingFolderIsEditable", { folderID });
+      if (ed?.Item === false) throw new EdocError("საქაღალდე რედაქტირებადი აღარ არის");
+      done.addressees = [];
+      for (const e of resolved) {
+        const r = await call("CreateTaskWorkingFolderInternalContact", { taskWorkingFolderInternalContact: {
+          FolderID: folderID, EmployeeID: e.EmployeeID, EmployeeFirstName: e.EmployeeLastName, PositionID: e.PositionID, OrgStructureID: e.OrgStructureID, Comments: "" } });
+        if (!r?.ID) throw new EdocError(`ადრესატი (${empShape(e).name}) ვერ დაემატა`);
+        done.addressees.push(empShape(e).name);
+      }
+      done.steps.push("addressees");
+
+      const nowMs = Date.now();
+      const sg = await call("SaveTaskSignatoryChanges", { taskID, signatures: [{
+        AutoSignMode: 1, BlockedState: 1, CreatorEmployeeID: creator.EmployeeID, CreatorOrgStructureID: creator.OrgStructureID,
+        CreatorPositionID: creator.PositionID, CurrentStatus: 1, Deadline: dateMs(nowMs + Math.max(1, deadlineDays) * 86400000), EditMode: 1,
+        EntryDate: dateMs(nowMs), FolderID: folderID, FolderStatus: 1, Index: 1,
+        SignatoryEmployeeID: signEmp.EmployeeID, SignatoryInfo: clean(signEmp.EmployeeWorkInfo || signEmp.EmployeeInfo),
+        SignatoryOrgStructureID: signEmp.OrgStructureID, SignatoryPositionID: signEmp.PositionID, TaskID: taskID,
+        DelegateID: null, DelegateEmployeeID: null, DelegateEmployeeLastName: null, DelegateEmployeeFirstName: null, DelegatePositionID: null,
+        DelegatePositionTypeName: null, DelegatePeriodStart: null, DelegatePeriodEnd: null, DelegateInfoMasked: null, DelegateWorkingInfo: null,
+        DelegateInfo: null, StatusChangedDate: null, index: 0, SaveResult: null, SaveResultComments: null, DeadlineDatePart: null, EntryDatePart: null }] });
+      const bad = (sg?.Items || []).find((x) => x && x.SaveResult === false);
+      if (bad) throw new EdocError(`ხელმომწერი ვერ შეინახა: ${bad.SaveResultComments || "უარი"}`);
+      done.steps.push("signatory");
+    } catch (e) { return fail(e); }
+
+    // ---- გადამოწმება: ხელმოსაწერებში უნდა გამოჩნდეს ----
+    let sign = null;
+    if (signEmp.EmployeeID === s.employeeID) {
+      try { sign = (await signsRaw("received")).find((x) => x.TaskID === done.task_id) || null; } catch {}
+    }
+    return { ok: true, message: `დავალება N ${done.task_number || "?"} შეიქმნა და გაიგზავნა ხელმოსაწერად`, created: done, details: preview,
+      sign_item: sign ? shapeSign(sign) : null,
+      next: sign ? `ადრესატთან გასაგზავნად საჭიროა ხელმოწერა: edoc_sign target=${done.task_number} (ჯერ preview, მერე confirm=true — მხოლოდ მომხმარებლის თანხმობით).`
+        : "ხელმოსაწერებში ჯერ არ ჩანს — შეამოწმე edoc_list_signs-ით ცოტა ხანში ან იდოკში." };
+  }
+
   // ---------- დიაგნოსტიკა (მხოლოდ კითხულობს) ----------
+  const wsdlCache = new Map();
   async function getText(url) {
-    const r = await fetch(url, { signal: AbortSignal.timeout(url.includes("wsdl") ? 8000 : TIMEOUT_MS) });
+    const isWsdl = /wsdl/i.test(url);
+    if (isWsdl && wsdlCache.has(url)) return wsdlCache.get(url);
+    const r = await fetch(url, { signal: AbortSignal.timeout(isWsdl ? 90000 : TIMEOUT_MS) });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    return r.text();
+    const t = await r.text();
+    if (isWsdl) wsdlCache.set(url, t); // WSDL დიდია და VPN-ით ნელა მოდის — პროცესის სიცოცხლეში ერთხელ ვტვირთავთ
+    return t;
   }
   async function discover(pattern = "Vise", { types = [], skipJs = false } = {}) {
     if (VPN_AUTO && !(await edocReachable(BASE))) { const v = await ensureVpn(HOST, { profile: VPN_PROFILE, base: BASE }); if (!v.ok) throw new EdocError("VPN: " + v.message); }
@@ -511,6 +718,7 @@ export function createEdoc(cfg = {}) {
     listSigns: op(listSigns),
     sign: op((a) => guardedAction({ ...a, kind: "sign" })),
     ignore: op(ignore),
+    createTask: op(createTask),
     ignoreFile: ign?.file || null,
     vpn: op(() => ensureVpn(HOST, { profile: VPN_PROFILE, base: BASE })),
     discover: op(discover),

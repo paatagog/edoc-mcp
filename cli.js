@@ -8,6 +8,7 @@
 //   node cli.js vise <ნომერი|id|სათაური> [--comment "..."] [--confirm]
 //   node cli.js sign <ნომერი|id|სათაური> [--comment "..."] [--confirm]
 //   node cli.js ignore [list|add|remove] [vise|sign] [<ნომერი|id|სათაური>] [--reason "..."]
+//   node cli.js create --title "..." --to "გვარი [სახელი] [| თანამდებობა]" [--to ...] --file <main.docx> [--attach <file>]... [--confirm]
 //   node cli.js vpn
 //   node cli.js discover <regex>
 //
@@ -20,7 +21,9 @@ const argv = process.argv.slice(2);
 const cmd = argv[0];
 const flag = (f) => argv.includes(f);
 const opt = (f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : undefined; };
-const pos = argv.slice(1).filter((a, i, all) => !a.startsWith("--") && all[i - 1] !== "--comment" && all[i - 1] !== "--reason");
+const VALUED = ["--comment", "--reason", "--title", "--to", "--file", "--attach", "--signer-position"];
+const pos = argv.slice(1).filter((a, i, all) => !a.startsWith("--") && !VALUED.includes(all[i - 1]));
+const opts = (f) => argv.flatMap((a, i) => (a === f && argv[i + 1] !== undefined ? [argv[i + 1]] : []));
 const num = (d) => (pos[0] && /^\d+$/.test(pos[0]) ? Number(pos[0]) : d);
 const direction = flag("--sent") ? "sent" : "received";
 
@@ -54,6 +57,19 @@ const commands = {
   vise: () => guarded("vise"),
   sign: () => guarded("sign"),
   ignore: () => edoc.ignore({ action: pos[0] || "list", kind: pos[1], target: pos.slice(2).join(" ") || undefined, reason: opt("--reason") }),
+  create: async () => {
+    const a = { title: opt("--title"), addressees: opts("--to"), signerPosition: opt("--signer-position"), comment: opt("--comment"),
+      files: [...opts("--file").map((p) => ({ path: p, kind: "main" })), ...opts("--attach").map((p) => ({ path: p, kind: "attachment" }))] };
+    const preview = await edoc.createTask({ ...a, confirm: false });
+    if (!flag("--confirm") || preview.ok === false) return preview;
+    if (!flag("--yes")) {
+      console.error(JSON.stringify(preview, null, 1));
+      const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+      const ans = (await rl.question("შევქმნა და გავგზავნო ხელმოსაწერად? (კი/არა): ")).trim().toLowerCase(); rl.close();
+      if (!["კი", "ki", "yes", "y"].includes(ans)) return { ok: false, error: "გაუქმდა" };
+    }
+    return edoc.createTask({ ...a, confirm: true });
+  },
   vpn: () => edoc.vpn(),
   discover: () => edoc.discover(pos[0] || "Vise", { skipJs: true }),
 };

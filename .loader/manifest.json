@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "edoc",
   "display_name": "იდოკი (eDocument)",
-  "version": "3.1.0",
+  "version": "3.2.0",
   "description": "ილიაუნის eDocument (იდოკი) — ჩამტვირთავი. ხელსაწყოების კოდს კითხულობს კომპიუტერის საქაღალდიდან (ნაგულისხმევად Documents\\edoc-mcp), ასე რომ კოდის შეცვლა ხელახლა დაყენებას არ საჭიროებს. საჭიროებისას თავად რთავს VPN-ს (FortiClient).",
   "author": {
     "name": "Paata Gogishvili"
@@ -49,6 +49,10 @@
     {
       "name": "edoc_sign",
       "description": "დოკუმენტზე ხელის მოწერა (დადასტურებით)"
+    },
+    {
+      "name": "edoc_create_task",
+      "description": "ახალი დავალების (მოხსენებითის) შექმნა და ხელმოსაწერად გაგზავნა — ადრესატი, ფაილები, ხელმომწერი; confirm-ის გარეშე მხოლოდ preview"
     },
     {
       "name": "vpn_connect",
