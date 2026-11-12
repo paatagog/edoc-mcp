@@ -4,7 +4,7 @@
 import { createEdoc } from "./core/edoc.js";
 import { defaultIgnoreFile } from "./core/ignore.js";
 
-export const VERSION = "3.2.0";
+export const VERSION = "3.3.0";
 
 const edoc = createEdoc({
   base: process.env.EDOC_BASE_URL,
@@ -141,7 +141,8 @@ export default function defineTools({ z }) {
         title: "იდოკი — ახალი დავალების (მოხსენებითის) შექმნა",
         description: "Creates a new internal eDocument task (e.g. a memo / მოხსენებითი ბარათი) and sends it for signature: task title, addressee(s), " +
           "files from this computer (first/kind=main must be a Word .doc/.docx; others are attachments), signatory (default: the user, own main position). " +
-          "No visa authors yet. Addressees: \"surname [first name] [| part of position]\"; one on leave is replaced by their delegate (reported). " +
+          "Optional visa authors (vise_authors, same name format): their visa requests are sent immediately on creation and the signature waits for them " +
+          "(sign_block). Addressees: \"surname [first name] [| part of position]\"; someone on leave is replaced by their delegate (reported). " +
           "Without confirm=true it only resolves people/files and returns a preview — nothing is created. With confirm=true it creates the task in eDocument " +
           "(cannot be deleted by these tools) and puts it into the signatory's signature list; it reaches the addressee only after signing (edoc_sign). " +
           "Only call with confirm=true after the user explicitly approved this exact preview.",
@@ -154,6 +155,8 @@ export default function defineTools({ z }) {
             name: z.string().optional().describe("სახელი იდოკში (ნაგულისხმევად ფაილის სახელი)"),
           })).min(1),
           signer: z.string().optional().describe("ხელმომწერი, თუ თავად მომხმარებელი არ არის: „გვარი სახელი [| თანამდებობა]“"),
+          vise_authors: z.array(z.string().min(1)).default([]).describe("ვიზიორები: „გვარი [სახელი] [| თანამდებობა]“ (პარალელურად, ერთ დონეზე)"),
+          sign_block: z.enum(["completed", "confirmed", "none"]).default("completed").describe("ვიზიორების არსებობისას ხელმოწერა დაიბლოკოს: completed — ვიზირების დასრულებამდე, confirmed — ვიზების დადასტურებამდე, none — არა"),
           signer_position: z.string().optional().describe("საკუთარი თანამდებობის ნაწილი, თუ რამდენიმე გაქვს (მაგ. „დირექტორი“)"),
           deadline_days: z.number().int().min(1).max(365).default(14),
           comment: z.string().optional().describe("დავალების კომენტარი"),
@@ -161,8 +164,8 @@ export default function defineTools({ z }) {
         },
         annotations: DESTRUCTIVE,
       },
-      handler: wrap(({ title, addressees, files, signer, signer_position, deadline_days, comment, confirm }) =>
-        edoc.createTask({ title, addressees, files, signer, signerPosition: signer_position, deadlineDays: deadline_days, comment, confirm })),
+      handler: wrap(({ title, addressees, files, vise_authors, sign_block, signer, signer_position, deadline_days, comment, confirm }) =>
+        edoc.createTask({ title, addressees, files, viseAuthors: vise_authors, signBlock: sign_block, signer, signerPosition: signer_position, deadlineDays: deadline_days, comment, confirm })),
     },
     {
       name: "vpn_connect",

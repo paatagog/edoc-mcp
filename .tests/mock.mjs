@@ -48,6 +48,7 @@ export function startMock(port) {
     ListEmployeesForUser: (b) => ok({ Items: state.emps.filter((e) => e.EmployeeLastName.startsWith(b.prefix)) }),
     saveTask: (b) => { state.created.push({ task: b }); return ok({ ResultTask: { ID: "NT", RootID: "NT", Number: 60001 } }); },
     CreateTaskWorkingFolder: (b) => { state.created.push({ folder: b }); return ok({ ID: "NF" }); },
+    saveViseAuthorChanges: (b) => { state.created.push({ vises: b.viseAuthors }); return ok({ Items: b.viseAuthors.map((v) => ({ ...v, ID: "V" + v.AuthorEmployeeID, SaveResult: 1 })) }); },
     CheckTaskWorkingFolderIsEditable: () => ok({ Item: true }),
     CreateTaskWorkingFolderInternalContact: (b) => { state.created.push({ contact: b.taskWorkingFolderInternalContact }); return ok({ ID: "C" + state.created.length }); },
     SaveTaskSignatoryChanges: (b) => { state.created.push({ signers: b.signatures }); const g = b.signatures[0];

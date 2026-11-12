@@ -68,7 +68,7 @@ await t("create: confirm-ის გარეშე → preview, არაფე�
 await t("create: ძირითადი არა-Word → უარი", async () => { const r = await edoc.createTask({ title: "x", addressees: ["ტვილდიანი"], files: [{ path: pdf }] }); assert.equal(r.ok, false); });
 await t("create: ფაილი არ არსებობს → უარი", async () => { const r = await edoc.createTask({ title: "x", addressees: ["ტვილდიანი"], files: [{ path: docx + "z" }] }); assert.equal(r.ok, false); });
 await t("create: ორაზროვანი ადრესატი → უარი კანდიდატებით", async () => { const r = await edoc.createTask({ title: "x", addressees: ["ბერიძე"], files: [{ path: docx }] }); assert.equal(r.ok, false); assert.equal(r.problems[0].candidates.length, 2); });
-await t("create: ვიზიორი → ჯერ არ არის მხარდაჭერილი", async () => { const r = await edoc.createTask({ title: "x", addressees: ["ტვილდიანი"], files: [{ path: docx }], viseAuthors: ["ა"] }); assert.equal(r.ok, false); });
+await t("create: უცნობი ვიზიორი → უარი", async () => { const r = await edoc.createTask({ title: "x", addressees: ["ტვილდიანი"], files: [{ path: docx }], viseAuthors: ["უცნობი"] }); assert.equal(r.ok, false); assert.ok(r.problems[0].vise_author); });
 await t("create: შვებულებაში მყოფი → შემცვლელი", async () => { const r = await edoc.createTask({ title: "x", addressees: ["დარახველიძე ქეთევან"], files: [{ path: docx }] }); assert.equal(r.will_create.addressees[0].employee_id, "M"); assert.ok(r.will_create.notes[0].includes("შვებულ")); });
 await t("create: საკუთარი მეორე თანამდებობით", async () => { const r = await edoc.createTask({ title: "x", addressees: ["ტვილდიანი"], files: [{ path: docx }], signerPosition: "ხარისხის" }); assert.equal(r.will_create.signer.position_id, "P2"); });
 await t("create: confirm → სრული თანმიმდევრობა და ხელმოსაწერებში ჩნდება", async () => {
@@ -81,6 +81,17 @@ await t("create: confirm → სრული თანმიმდევრო�
   assert.equal(state.created.find((c) => c.folder).folder.taskWorkingFolder.DocumentType, 3);
   assert.ok(!state.calls.includes("ChangeSignatoryStatus") || state.calls.filter((c) => c === "ChangeSignatoryStatus").length === 1, "ხელს არ აწერს");
 });
+await t("create: ვიზიორით → saveViseAuthorChanges ხელმომწერამდე, ხელმოწერა დაბლოკილი (2)", async () => {
+  const before = state.calls.length;
+  const r = await edoc.createTask({ title: "ვიზით", addressees: ["ტვილდიანი"], files: [{ path: docx }], viseAuthors: ["მოსეშვილი"], confirm: true });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const seq = state.calls.slice(before).filter((c) => ["CreateTaskWorkingFolderInternalContact", "saveViseAuthorChanges", "SaveTaskSignatoryChanges"].includes(c));
+  assert.deepEqual(seq, ["CreateTaskWorkingFolderInternalContact", "saveViseAuthorChanges", "SaveTaskSignatoryChanges"]);
+  const v = state.created.filter((c) => c.vises).pop().vises[0]; assert.equal(v.AuthorEmployeeID, "M"); assert.equal(v.Level, 1); assert.match(v.ID, /^[0-9a-f-]{36}$/);
+  assert.equal(state.created.filter((c) => c.signers).pop().signers[0].BlockedState, 2);
+  assert.equal(r.details.vise_authors[0].employee_id, "M");
+});
+await t("create: ვიზიორის გარეშე → BlockedState 1", async () => { assert.equal(state.created.filter((c) => c.signers)[0].signers[0].BlockedState, 1); });
 fs.rmSync(tmp, { recursive: true, force: true });
 await t("ცვლილების ბრძანებები მხოლოდ confirm-ით", async () => {
   assert.deepEqual(state.calls.filter((c) => c.startsWith("Change")), ["ChangeViseAuthorStatus", "ChangeSignatoryStatus"]);

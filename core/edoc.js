@@ -7,6 +7,7 @@ import { ensureVpn, edocReachable } from "./vpn.js";
 import { createIgnoreStore } from "./ignore.js";
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 
 export class EdocError extends Error {
   constructor(message, data) { super(message); this.data = data; }
@@ -451,7 +452,7 @@ export function createEdoc(cfg = {}) {
   // ---------- ახალი დავალება (მოხსენებითი) — შექმნა და ხელმოსაწერად გაგზავნა ----------
   // თანმიმდევრობა ჩაწერილია ვებ-აპლიკაციიდან (2026-11-12, დავალებები 52346/52355):
   // saveTask → CreateTaskWorkingFolder → ფაილები (TaskWorkingFilesUploadHandler.ashx) → CheckTaskWorkingFolderIsEditable →
-  // CreateTaskWorkingFolderInternalContact (ადრესატი) → SaveTaskSignatoryChanges (ხელმომწერი).
+  // CreateTaskWorkingFolderInternalContact (ადრესატი) → saveViseAuthorChanges (ვიზიორები, თუ არის) → SaveTaskSignatoryChanges (ხელმომწერი).
   // ამის შემდეგ დოკუმენტი ხელმომწერის „ხელმოსაწერებში“ ჩნდება; ადრესატთან მიდის ხელმოწერის (edoc_sign) შემდეგ.
   const FOLDER_TEMPLATE_ID = "e8b991b5-6e68-e611-8bf6-000c294b1e9c"; // ვებ-აპლიკაციის ნაგულისხმევი („ცარიელი“) შაბლონი
   const DOC_TYPE_INTERNAL = 3;
@@ -535,11 +536,10 @@ export function createEdoc(cfg = {}) {
    * confirm=false → მხოლოდ შემოწმება და preview (იდოკში არაფერი იქმნება).
    * confirm=true → ქმნის და აგზავნის ხელმოსაწერად; ადრესატთან მიდის მხოლოდ ხელმოწერის შემდეგ (edoc_sign).
    */
-  async function createTask({ title, addressees = [], files = [], signer, signerPosition, viseAuthors = [], deadlineDays = 14, comment, confirm = false } = {}) {
+  async function createTask({ title, addressees = [], files = [], signer, signerPosition, viseAuthors = [], signBlock, deadlineDays = 14, comment, confirm = false } = {}) {
     const s = await me();
     const text = clean(title);
     if (!text) return { ok: false, error: "მიუთითე დავალების სათაური (title)" };
-    if (viseAuthors && viseAuthors.length) return { ok: false, error: "ვიზირება (vise_authors) ჯერ არ არის მხარდაჭერილი — შექმენი ვიზირების გარეშე ან დაამატე ვიზიორი იდოკში ხელით" };
     if (!Array.isArray(addressees) || !addressees.length) return { ok: false, error: "მიუთითე მინიმუმ ერთი ადრესატი" };
     const fc = checkFiles(files);
     if (fc.error) return { ok: false, error: fc.error, files: fc.files };
@@ -557,7 +557,23 @@ export function createEdoc(cfg = {}) {
       }
       resolved.push(emp);
     }
-    if (problems.length) return { ok: false, error: "ადრესატი ვერ განისაზღვრა ცალსახად", problems };
+    const vises = [];
+    for (const a of viseAuthors || []) {
+      const r = await resolvePerson(a);
+      if (r.error) { problems.push({ vise_author: a, error: r.error, candidates: r.candidates }); continue; }
+      let emp = r.emp;
+      if (emp.DelegateEmployeeID) {
+        const d = (await findEmployees((emp.DelegateEmployeeLastName || "").slice(0, -1) || emp.DelegateEmployeeLastName))
+          .find((e) => e.EmployeeID === emp.DelegateEmployeeID && (!emp.DelegatePositionID || e.PositionID === emp.DelegatePositionID));
+        if (d) { notes.push(`ვიზიორი ${empShape(emp).name} — შვებულებაშია; ჩაიწერა შემცვლელი: ${empShape(d).name}`); emp = d; }
+        else problems.push({ vise_author: a, error: "შვებულებაშია, შემცვლელი ვერ მოიძებნა", person: empShape(emp) });
+      }
+      vises.push(emp);
+    }
+    if (problems.length) return { ok: false, error: "ადრესატი ან ვიზიორი ვერ განისაზღვრა ცალსახად", problems };
+    // ხელმოწერის დაბლოკვა (TaskSignatureBlockStates): 1 არა, 2 ვიზირების დასრულებამდე, 3 ვიზების დადასტურებამდე
+    const BLOCK = { none: 1, completed: 2, confirmed: 3 };
+    const blockState = vises.length ? (BLOCK[signBlock] || 2) : 1;
 
     let signEmp;
     if (signer) { const r = await resolvePerson(signer); if (r.error) return { ok: false, error: `ხელმომწერი: ${r.error}`, candidates: r.candidates }; signEmp = r.emp; }
@@ -566,13 +582,14 @@ export function createEdoc(cfg = {}) {
 
     const preview = {
       title: text, comment: clean(comment), deadline_days: deadlineDays,
-      addressees: resolved.map(empShape), signer: empShape(signEmp), vise_authors: [],
+      addressees: resolved.map(empShape), signer: empShape(signEmp), vise_authors: vises.map(empShape),
+      signature_blocked: { 1: "არა", 2: "ვიზირების დასრულებამდე", 3: "ვიზების დადასტურებამდე" }[blockState],
       files: fc.files.map((f) => ({ name: f.name, kind: f.kind === "main" ? "ძირითადი" : "დანართი", size: f.size })),
       creator: empShape(creator),
     };
     if (notes.length) preview.notes = notes;
     if (!confirm) return { ok: true, dry_run: true, will_create: preview,
-      note: "არაფერი შექმნილა. შესაქმნელად და ხელმოსაწერად გასაგზავნად გამოიძახე იგივე confirm=true-ით. ადრესატთან წავა მხოლოდ ხელმოწერის შემდეგ." };
+      note: "არაფერი შექმნილა. შესაქმნელად გამოიძახე იგივე confirm=true-ით. ვიზიორებთან მოთხოვნა შექმნისთანავე მიდის; ადრესატთან — მხოლოდ ხელმოწერის შემდეგ." };
 
     // ---- შექმნა ----
     const done = { steps: [] };
@@ -620,9 +637,21 @@ export function createEdoc(cfg = {}) {
       }
       done.steps.push("addressees");
 
+      if (vises.length) {
+        const nowV = Date.now(), dlV = dateMs(nowV + Math.max(1, deadlineDays) * 86400000);
+        const vr = await call("saveViseAuthorChanges", { taskID, viseAuthors: vises.map((e) => ({
+          AuthorEmployeeID: e.EmployeeID, AuthorPositionID: e.PositionID, AuthorOrgStructureID: e.OrgStructureID,
+          CreatorEmployeeID: creator.EmployeeID, CreatorPositionID: creator.PositionID, CreatorOrgStructureID: creator.OrgStructureID,
+          CurrentStatus: 1, Deadline: dlV, EditMode: 1, EntryDate: dateMs(nowV), FolderID: folderID, ID: randomUUID(), Level: 1, ParentID: null, TaskID: taskID })) });
+        const items = vr?.Items || [];
+        const badV = items.find((x) => x && x.SaveResult !== 1 && x.SaveResult !== true && x.SaveResult != null);
+        if (badV || items.length < vises.length) throw new EdocError(`ვიზიორი ვერ შეინახა: ${badV?.SaveResultComments || "უარი"}`);
+        done.vise_authors = vises.map((e) => empShape(e).name); done.steps.push("vise_authors");
+      }
+
       const nowMs = Date.now();
       const sg = await call("SaveTaskSignatoryChanges", { taskID, signatures: [{
-        AutoSignMode: 1, BlockedState: 1, CreatorEmployeeID: creator.EmployeeID, CreatorOrgStructureID: creator.OrgStructureID,
+        AutoSignMode: 1, BlockedState: blockState, CreatorEmployeeID: creator.EmployeeID, CreatorOrgStructureID: creator.OrgStructureID,
         CreatorPositionID: creator.PositionID, CurrentStatus: 1, Deadline: dateMs(nowMs + Math.max(1, deadlineDays) * 86400000), EditMode: 1,
         EntryDate: dateMs(nowMs), FolderID: folderID, FolderStatus: 1, Index: 1,
         SignatoryEmployeeID: signEmp.EmployeeID, SignatoryInfo: clean(signEmp.EmployeeWorkInfo || signEmp.EmployeeInfo),
@@ -642,7 +671,8 @@ export function createEdoc(cfg = {}) {
     }
     return { ok: true, message: `დავალება N ${done.task_number || "?"} შეიქმნა და გაიგზავნა ხელმოსაწერად`, created: done, details: preview,
       sign_item: sign ? shapeSign(sign) : null,
-      next: sign ? `ადრესატთან გასაგზავნად საჭიროა ხელმოწერა: edoc_sign target=${done.task_number} (ჯერ preview, მერე confirm=true — მხოლოდ მომხმარებლის თანხმობით).`
+      next: sign ? (vises.length ? `ვიზირების მოთხოვნა გაიგზავნა; ხელმოწერა (edoc_sign target=${done.task_number}) შესაძლებელი იქნება ვიზ(ებ)ის შემდეგ.`
+        : `ადრესატთან გასაგზავნად საჭიროა ხელმოწერა: edoc_sign target=${done.task_number} (ჯერ preview, მერე confirm=true — მხოლოდ მომხმარებლის თანხმობით).`)
         : "ხელმოსაწერებში ჯერ არ ჩანს — შეამოწმე edoc_list_signs-ით ცოტა ხანში ან იდოკში." };
   }
 
