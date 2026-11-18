@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "edoc",
   "display_name": "იდოკი (eDocument)",
-  "version": "3.4.0",
+  "version": "3.5.0",
   "description": "ილიაუნის eDocument (იდოკი) — ჩამტვირთავი. ხელსაწყოების კოდს კითხულობს კომპიუტერის საქაღალდიდან (ნაგულისხმევად Documents\\edoc-mcp), ასე რომ კოდის შეცვლა ხელახლა დაყენებას არ საჭიროებს. საჭიროებისას თავად რთავს VPN-ს (FortiClient).",
   "author": {
     "name": "Paata Gogishvili"
@@ -26,6 +26,10 @@
     }
   },
   "tools": [
+    {
+      "name": "edoc_guide",
+      "description": "გზამკვლევი AI აგენტისთვის: ცნებები, ხელსაწყოები, ახალი დავალების შექმნა, წესები"
+    },
     {
       "name": "edoc_list_tasks",
       "description": "ბოლო N დავალება იდოკიდან"
@@ -56,7 +60,7 @@
     },
     {
       "name": "edoc_task_card",
-      "description": "დავალების ბარათი: ვინ ვის გადააწერა, ვიზები, ხელმოწერები, კომენტარები, ფაილები"
+      "description": "დავალების ბარათი: ვინ ვის გადააწერა, ვიზები, ხელმოწერები, კომენტარები, ფაილები + დოკუმენტის სრული მოძრაობა (document_movement)"
     },
     {
       "name": "edoc_download",

@@ -3,8 +3,9 @@
 // ამ საქაღალდეს კითხულობს ჩამტვირთავი გაფართოება; ცვლილება მოქმედებს შემდეგივე გამოძახებიდან.
 import { createEdoc } from "./core/edoc.js";
 import { defaultIgnoreFile } from "./core/ignore.js";
+import { GUIDE } from "./core/guide.js";
 
-export const VERSION = "3.4.0";
+export const VERSION = "3.5.0";
 
 const edoc = createEdoc({
   base: process.env.EDOC_BASE_URL,
@@ -28,6 +29,19 @@ const DESTRUCTIVE = { readOnlyHint: false, destructiveHint: true, idempotentHint
 export default function defineTools({ z }) {
   const dir = z.enum(["received", "sent"]).default("received").describe("received = მიღებული, sent = გაცემული");
   return [
+    {
+      name: "edoc_guide",
+      config: {
+        title: "იდოკი — გზამკვლევი (წაიკითხე პირველად)",
+        description: "Returns the guide for AI agents using these eDocument (იდოკი, Ilia State University) tools: who the user is, the key concepts " +
+          "(document vs task, assignment/გადაწერა, resolution, visa, signature, how a memo moves), which tool to use when, the exact step-by-step " +
+          "procedure for creating and sending a new task/memo, safety rules for irreversible actions, and answer examples. Call it once at the start " +
+          "of any eDocument work if you have not read it in this conversation. Works offline; changes nothing.",
+        inputSchema: {},
+        annotations: { readOnlyHint: true, openWorldHint: false },
+      },
+      handler: async () => ({ content: [{ type: "text", text: GUIDE }] }),
+    },
     {
       name: "edoc_list_tasks",
       config: {
@@ -172,18 +186,23 @@ export default function defineTools({ z }) {
       name: "edoc_task_card",
       config: {
         title: "იდოკი — დავალების ბარათი (ვინ ვის გადააწერა, ვიზები, კომენტარები)",
-        description: "Full card of ONE eDocument task by task number or id (received or sent, also tasks seen only as a visa/signature request): " +
-          "assignments — who forwarded (გადააწერა) the task to whom, when, with what text/comment and current status, as a flat list plus the nested tree " +
-          "(responsibles_tree, with each person's status history); vises — every visa author per working folder with status, dates, who requested it, comments and " +
-          "status history (who vised when); signatures — signatories with status/history; folders — working folders (memo drafts) with their files; documents — " +
-          "registered documents with files and chancellery comments; task_files. File ids can be passed to edoc_download. Read-only.",
+        description: "Full card of ONE eDocument task by task number or id (received or sent, also tasks seen only as a visa/signature request). " +
+          "Use it to answer 'who assigned what to whom' (ვინ ვის რა დაავალა) and to get file ids. Returns: " +
+          "assignments — this task's movement: each line from (who assigned) → to (to whom), text (the resolution/instruction), assigned_at, status, " +
+          "comments (how it was closed), depth (0 = first addressee), history; " +
+          "document_movement — OTHER tasks linked to this task's registered documents, each with its own assignments. IMPORTANT: for a task the user SENT, " +
+          "assignments shows only the user's own line; what the addressees (e.g. the rector) then assigned to others is in document_movement with " +
+          "relation='request' (the task the chancellery created on the registered document) — that is the document's full movement; " +
+          "vises — visa authors with status/dates/who requested; signatures; folders — working folders (memo drafts) with files; documents — registered " +
+          "documents with files (files[].id → edoc_download). Read-only. If unsure how eDocument works, call edoc_guide first.",
         inputSchema: {
           target: z.string().min(1).describe("დავალების ნომერი (მაგ. 53163) ან id"),
           include_history: z.boolean().default(true).describe("თითო ადრესატის/ვიზიორის/ხელმომწერის სტატუსების ისტორია (უფრო ნელია)"),
+          include_related: z.boolean().default(true).describe("document_movement — მიბმული დოკუმენტების სხვა დავალებების მოძრაობა"),
         },
         annotations: RO,
       },
-      handler: wrap(({ target, include_history }) => edoc.taskCard({ target, includeHistory: include_history })),
+      handler: wrap(({ target, include_history, include_related }) => edoc.taskCard({ target, includeHistory: include_history, includeRelated: include_related })),
     },
     {
       name: "edoc_download",

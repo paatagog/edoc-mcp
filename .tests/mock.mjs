@@ -67,8 +67,12 @@ export function startMock(port) {
       return ok({ Items: [{ ...g, SaveResult: true }] }); },
     ListFilesForDocument: () => ok({ Items: [{ ID: "df", FileName: "doc.pdf", FileTypeCaption: "დედანი" }] }),
     ListDocumentCommentsForCard: () => ok({ Items: [{ Text: "agil@iliauni.edu.ge", Author: "გურგენიძე ანა", CreateDate: D(now), IsDeleted: false }] }),
-    GetTaskForCard: (b) => ok({ Item: { ID: b.taskID, Number: 53163, NumberMasked: "53163", Creator: "კანცელარია", TaskText: "განცხადება", CurrentStatus: 1 } }),
-    ListResponsiblesByTaskForCard: () => ok({ Items: [{ ResponsibleID: "R0", ResponsibleEmployeeID: "DOB", ResponsibleLastName: "დობორჯგინიძე", ResponsibleFirstName: "ნინო", ResponsiblePosition: "რექტორი", Status: 3, StartDate: D(now),
+    GetTaskForCard: (b) => ok({ Item: b.taskID === "REG" ? { ID: "REG", Number: 49224, NumberMasked: "49224", Creator: "საქმის წარმოების სამმართველო", CurrentStatus: 1 }
+      : { ID: b.taskID, Number: 53163, NumberMasked: "53163", Creator: "კანცელარია", TaskText: "განცხადება", CurrentStatus: 1 } }),
+    ListTaskRelatedDocumentByDocument: (b) => ok({ Items: b.documentID === "d1" ? [{ TaskID: "REG", DocumentID: "d1", DocumentType: 3, RelationType: 2 }, { TaskID: "t1", DocumentID: "d1", DocumentType: 3, RelationType: 1 }] : [] }),
+    ListResponsiblesByTaskForCard: (b) => b.taskID === "REG" ? ok({ Items: [{ ResponsibleID: "G0", ResponsibleEmployeeID: "DOB", ResponsibleLastName: "დობორჯგინიძე", ResponsibleFirstName: "ნინო", ResponsiblePosition: "რექტორი", Status: 7, StartDate: D(now), Comments: "შესრულდა 1-03 დოკუმენტით",
+      ChildResponsibles: [{ ResponsibleID: "G1", ResponsibleEmployeeID: "DAL", ResponsibleLastName: "ცქიტიშვილი", ResponsibleFirstName: "დალი", ResponsiblePosition: "სამსახურის უფროსი", Status: 7, StartDate: D(now + 1000), CreatorEmployeeID: "DOB", TaskText: "გთხოვთ, მისცეთ მსვლელობა",
+        ChildResponsibles: [{ ResponsibleID: "G2", ResponsibleEmployeeID: "EBR", ResponsibleLastName: "ებრალიძე", ResponsibleFirstName: "თამარ", Status: 7, StartDate: D(now + 2000), CreatorEmployeeID: "DAL", TaskText: "მოამზადეთ ბრძანება" }] }] }] }) : ok({ Items: [{ ResponsibleID: "R0", ResponsibleEmployeeID: "DOB", ResponsibleLastName: "დობორჯგინიძე", ResponsibleFirstName: "ნინო", ResponsiblePosition: "რექტორი", Status: 3, StartDate: D(now),
       ChildResponsibles: [
         { ResponsibleID: "R1", ResponsibleEmployeeID: "KAV", ResponsibleLastName: "ყაველაშვილი", ResponsibleFirstName: "ნიკოლოზ", Status: 3, StartDate: D(now + 1000), TaskText: "გთხოვთ, განიხილოთ", CreatorEmployeeID: "DOB",
           ChildResponsibles: [{ ResponsibleID: "R2", ResponsibleEmployeeID: "E", ResponsibleLastName: "გოგიშვილი", ResponsibleFirstName: "პაატა", Status: 2, StartDate: D(now + 2000), CreatorEmployeeID: "KAV" }] }] }] }),

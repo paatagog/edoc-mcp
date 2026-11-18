@@ -713,7 +713,63 @@ export function createEdoc(cfg = {}) {
     return { error: `დავალება „${k}“ ვერ მოიძებნა (არც მიღებულებში, არც გაცემულებში, არც ვიზებსა და ხელმოწერებში)` };
   }
 
-  async function taskCard({ target, includeHistory = true } = {}) {
+  // დავალების ადრესატების ხე → ბრტყელი სია (from → to, რეზოლუცია, სტატუსი; სურვილისამებრ ისტორია)
+  async function buildAssignments(taskID, createdBy, includeHistory, safe) {
+    const rs = (await safe("ListResponsiblesByTaskForCard", () => call("ListResponsiblesByTaskForCard", { taskID })))?.Items || [];
+    const byEmp = new Map();
+    (function walk(a) { for (const n of a || []) { if (n.ResponsibleEmployeeID) byEmp.set(n.ResponsibleEmployeeID, nm(n.ResponsibleLastName, n.ResponsibleFirstName)); walk(n.ChildResponsibles); } })(rs);
+    const assignments = [];
+    const shapeResp = (n, parent, depth) => {
+      const who = nm(n.ResponsibleLastName, n.ResponsibleFirstName) || clean(n.ResponsibleInfo);
+      const from = parent ? (n.CreatorEmployeeID && n.CreatorEmployeeID !== parent.emp ? byEmp.get(n.CreatorEmployeeID) || n.CreatorEmployeeID : parent.name) : (byEmp.get(n.CreatorEmployeeID) || createdBy);
+      const o = { depth, responsible_id: n.ResponsibleID, to: who, position: clean(n.ResponsiblePosition), from: from || null,
+        text: clean(n.TaskText), comments: clean(n.Comments || n.CurrentStatusComments || n.StatusComments),
+        assigned_at: wcfDate(n.StartDate), deadline: wcfDate(n.DeadlineDate), status: st(n.Status ?? n.CurrentStatus)?.label, status_changed_at: wcfDate(n.StatusChangedDate),
+        is_me: n.ResponsibleEmployeeID === session.employeeID };
+      assignments.push(o);
+      (n.ChildResponsibles || []).forEach((c) => shapeResp(c, { emp: n.ResponsibleEmployeeID, name: who }, depth + 1));
+    };
+    rs.forEach((n) => shapeResp(n, null, 0));
+    if (includeHistory) {
+      await mapLimit(assignments.slice(0, 40), 4, async (o) => {
+        const h = await safe("ListStatusHistoryForResponsible", () => call("ListStatusHistoryForResponsible", { taskID, responsibleID: o.responsible_id }));
+        const hist = (h?.Items || []).map((x) => ({ date: wcfDate(x.CreateDate), by: nm(x.CreatorLastName, x.CreatorFirstName), status: st(x.Status)?.label,
+          comments: clean(x.Comments || x.CurrentStatusComments || x.StatusComments) })).sort((a, b) => String(a.date).localeCompare(String(b.date)));
+        if (hist.length) o.history = hist;
+      });
+    }
+    assignments.sort((a, b) => String(a.assigned_at).localeCompare(String(b.assigned_at)));
+    return { assignments, byEmp };
+  }
+
+  // დოკუმენტთან დაკავშირებული სხვა დავალებები (ListTaskRelatedDocumentByDocument) და მათი მოძრაობა.
+  // RelationType: 1 = Response (დოკუმენტი ამ დავალების შედეგად შეიქმნა), 2 = Request (დავალება ამ დოკუმენტზე შეიქმნა — მაგ. კანცელარიამ
+  // რეგისტრაციისას; აქ ჩანს რექტორის რეზოლუციები და შემდგომი გადაწერები), 3 = Working. გამოცდილია 2026-11-18 (16960-35 → 49224, 49208).
+  const RELATION = { 1: ["response", "დოკუმენტი ამ დავალების შედეგად შეიქმნა"], 2: ["request", "დავალება ამ დოკუმენტზე შეიქმნა (მისი მოძრაობა = დოკუმენტის მოძრაობა)"], 3: ["working", "სამუშაო კავშირი"] };
+  async function documentMovement(selfTaskID, documents, safe, { maxTasks = 8 } = {}) {
+    const seen = new Set([selfTaskID]); const out = [];
+    for (const d of documents || []) {
+      if (!d.id || !d.type?.code) continue;
+      const r = await safe(`ListTaskRelatedDocumentByDocument ${d.number || d.id}`, () => call("ListTaskRelatedDocumentByDocument", { documentID: d.id, documentType: d.type.code }));
+      for (const it of r?.Items || []) {
+        if (!it.TaskID || seen.has(it.TaskID) || out.length >= maxTasks) continue;
+        seen.add(it.TaskID);
+        const tc = (await safe("GetTaskForCard", () => call("GetTaskForCard", { taskID: it.TaskID })))?.Item || {};
+        const rel = RELATION[it.RelationType] || [String(it.RelationType), null];
+        const createdBy = clean(tc.Creator);
+        const { assignments } = await buildAssignments(it.TaskID, createdBy, false, safe);
+        out.push({ document: d.number || d.id, relation: rel[0], relation_label: rel[1],
+          task: { id: it.TaskID, number: tc.NumberMasked || (tc.Number != null ? String(tc.Number) : null), text: clean(tc.TaskText), created_by: createdBy,
+            started_at: wcfDate(tc.StartDate), deadline: wcfDate(tc.DeadlineDate), status: st(tc.CurrentStatus)?.label },
+          assignments });
+      }
+    }
+    // „request“ (დოკუმენტის ნაკადი) — პირველად
+    out.sort((a, b) => (a.relation === "request" ? 0 : 1) - (b.relation === "request" ? 0 : 1));
+    return out;
+  }
+
+  async function taskCard({ target, includeHistory = true, includeRelated = true } = {}) {
     const f = await findTask(target);
     if (f.error) return { ok: false, error: f.error };
     const taskID = f.id;
@@ -727,32 +783,7 @@ export function createEdoc(cfg = {}) {
       comments: clean(tc.Comments) };
 
     // 1) ვინ ვის გადააწერა — ხე და ბრტყელი სია
-    const rs = (await safe("ListResponsiblesByTaskForCard", () => call("ListResponsiblesByTaskForCard", { taskID })))?.Items || [];
-    const byEmp = new Map();
-    (function walk(a) { for (const n of a || []) { if (n.ResponsibleEmployeeID) byEmp.set(n.ResponsibleEmployeeID, nm(n.ResponsibleLastName, n.ResponsibleFirstName)); walk(n.ChildResponsibles); } })(rs);
-    const assignments = [];
-    const shapeResp = (n, parent, depth) => {
-      const who = nm(n.ResponsibleLastName, n.ResponsibleFirstName) || clean(n.ResponsibleInfo);
-      const from = parent ? (n.CreatorEmployeeID && n.CreatorEmployeeID !== parent.emp ? byEmp.get(n.CreatorEmployeeID) || n.CreatorEmployeeID : parent.name) : (byEmp.get(n.CreatorEmployeeID) || task.created_by);
-      const o = { depth: 0, responsible_id: n.ResponsibleID, to: who, position: clean(n.ResponsiblePosition), from: from || null,
-        text: clean(n.TaskText), comments: clean(n.Comments || n.CurrentStatusComments || n.StatusComments),
-        assigned_at: wcfDate(n.StartDate), deadline: wcfDate(n.DeadlineDate), status: st(n.Status ?? n.CurrentStatus)?.label, status_changed_at: wcfDate(n.StatusChangedDate),
-        is_me: n.ResponsibleEmployeeID === session.employeeID };
-      o.depth = depth;
-      assignments.push(o);
-      (n.ChildResponsibles || []).forEach((c) => shapeResp(c, { emp: n.ResponsibleEmployeeID, name: who }, depth + 1));
-      return o;
-    };
-    rs.forEach((n) => shapeResp(n, null, 0));
-    if (includeHistory) {
-      await mapLimit(assignments.slice(0, 40), 4, async (o) => {
-        const h = await safe("ListStatusHistoryForResponsible", () => call("ListStatusHistoryForResponsible", { taskID, responsibleID: o.responsible_id }));
-        const hist = (h?.Items || []).map((x) => ({ date: wcfDate(x.CreateDate), by: nm(x.CreatorLastName, x.CreatorFirstName), status: st(x.Status)?.label,
-          comments: clean(x.Comments || x.CurrentStatusComments || x.StatusComments) })).sort((a, b) => String(a.date).localeCompare(String(b.date)));
-        if (hist.length) o.history = hist;
-      });
-    }
-    assignments.sort((a, b) => String(a.assigned_at).localeCompare(String(b.assigned_at)));
+    const { assignments, byEmp } = await buildAssignments(taskID, task.created_by, includeHistory, safe);
 
     // 2) სამუშაო საქაღალდეები (მოხსენებითი/პასუხი) და მათი ფაილები
     const fl = (await safe("ListFoldersForCard", () => call("ListFoldersForCard", { taskID, folderID: null })))?.Items || [];
@@ -797,9 +828,12 @@ export function createEdoc(cfg = {}) {
     // 5) რეგისტრირებული დოკუმენტები (ფაილები, კომენტარები) და დავალების ფაილები
     const det = await taskDetails({ ID: taskID, ResponsibleID: f.raw?.ResponsibleID || null });
     if (det.errors) errs.push(...det.errors);
-    const out = { ok: true, task, assignments, vises, signatures, folders, documents: det.documents, task_files: det.task_files,
+    const document_movement = includeRelated ? await documentMovement(taskID, det.documents, safe) : [];
+    const out = { ok: true, task, assignments, document_movement, vises, signatures, folders, documents: det.documents, task_files: det.task_files,
       status_history: det.history,
-      note: "ფაილის გადმოსაწერად: edoc_download file_id=<id> (ან task=<ნომერი> ყველა ფაილისთვის)." };
+      note: "assignments — ამ დავალების მოძრაობა. document_movement — მიბმული დოკუმენტების სხვა დავალებები და მათი მოძრაობა " +
+        "(relation=request: დავალება, რომელიც დოკუმენტზე შეიქმნა — მაგ. რექტორის რეზოლუციები და შემდგომი გადაწერები; ეს არის დოკუმენტის სრული მოძრაობა). " +
+        "ფაილის გადმოსაწერად: edoc_download file_ids=[<id>] (ან task=<ნომერი> ყველა ფაილისთვის)." };
     if (errs.length) out.errors = errs;
     return out;
   }
@@ -873,7 +907,7 @@ export function createEdoc(cfg = {}) {
     let list = (fileIds || []).map((id) => ({ id, source: kind }));
     let sub = "files";
     if (task) {
-      const card = await taskCard({ target: task, includeHistory: false });
+      const card = await taskCard({ target: task, includeHistory: false, includeRelated: false });
       if (!card.ok) return card;
       sub = safeName(card.task.number || card.task.id);
       const docF = card.documents.flatMap((d) => (d.files || []).map((x) => ({ id: x.id, source: "document", kindLabel: x.kind, doc: d.number })));

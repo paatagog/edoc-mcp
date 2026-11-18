@@ -9,7 +9,8 @@
 //   node cli.js sign <ნომერი|id|სათაური> [--comment "..."] [--confirm]
 //   node cli.js ignore [list|add|remove] [vise|sign] [<ნომერი|id|სათაური>] [--reason "..."]
 //   node cli.js create --title "..." --to "გვარი [სახელი] [| თანამდებობა]" [--to ...] --file <main.docx> [--attach <file>]... [--vise "გვარი"]... [--confirm]
-//   node cli.js card <დავალების ნომერი|id> [--no-history]
+//   node cli.js card <დავალების ნომერი|id> [--no-history] [--no-related]
+//   node cli.js guide                           — აგენტის გზამკვლევი (GUIDE.md)
 //   node cli.js download <დავალების ნომერი> [--source all|documents|working] [--main] [--dir <საქაღალდე>] | download --id <ფაილის id> [--id ...]
 //   node cli.js vpn
 //   node cli.js discover <regex>
@@ -18,6 +19,7 @@
 import readline from "node:readline/promises";
 import { createEdoc } from "./core/edoc.js";
 import { defaultIgnoreFile } from "./core/ignore.js";
+import { GUIDE } from "./core/guide.js";
 
 const argv = process.argv.slice(2);
 const cmd = argv[0];
@@ -72,7 +74,8 @@ const commands = {
     }
     return edoc.createTask({ ...a, confirm: true });
   },
-  card: () => edoc.taskCard({ target: pos[0], includeHistory: !flag("--no-history") }),
+  card: () => edoc.taskCard({ target: pos[0], includeHistory: !flag("--no-history"), includeRelated: !flag("--no-related") }),
+  guide: async () => { process.stdout.write(GUIDE + "\n"); return undefined; },
   download: () => edoc.download({ fileIds: opts("--id"), task: pos[0], kind: opt("--kind") || "auto", source: opt("--source") || "auto", onlyMain: flag("--main"), dir: opt("--dir") }),
   vpn: () => edoc.vpn(),
   discover: () => edoc.discover(pos[0] || "Vise", { skipJs: true }),
@@ -84,7 +87,7 @@ if (!commands[cmd]) {
 }
 try {
   const r = await commands[cmd]();
-  console.log(JSON.stringify(r, null, 1));
+  if (r !== undefined) console.log(JSON.stringify(r, null, 1));
   process.exit(r && r.ok === false ? 1 : 0);
 } catch (e) {
   console.error(JSON.stringify({ error: e.message }));

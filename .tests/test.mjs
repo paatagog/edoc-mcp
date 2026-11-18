@@ -116,6 +116,26 @@ await t("card: დავალება ვიზების სიიდან
   const r = await edoc.taskCard({ target: "100" }); assert.equal(r.ok, true); assert.equal(r.task.id, "tv1");
   assert.equal(r.documents[0].number, "35/2"); assert.equal(r.errors, undefined);
 });
+// ---------- დოკუმენტის სრული მოძრაობა (3.5.0) ----------
+await t("card: document_movement — კანცელარიის დავალება დოკუმენტზე (request), საკუთარი თავი გამოტოვებული", async () => {
+  const r = await edoc.taskCard({ target: "t1", includeHistory: false });
+  assert.equal(r.ok, true, JSON.stringify(r)); assert.equal(r.errors, undefined, JSON.stringify(r.errors));
+  assert.equal(r.document_movement.length, 1); const m = r.document_movement[0];
+  assert.equal(m.relation, "request"); assert.equal(m.task.number, "49224"); assert.equal(m.document, "35/1");
+  assert.deepEqual(m.assignments.map((a) => `${a.from}→${a.to}`), ["საქმის წარმოების სამმართველო→დობორჯგინიძე ნინო", "დობორჯგინიძე ნინო→ცქიტიშვილი დალი", "ცქიტიშვილი დალი→ებრალიძე თამარ"]);
+  assert.equal(m.assignments[1].text, "გთხოვთ, მისცეთ მსვლელობა"); assert.equal(m.assignments[0].comments, "შესრულდა 1-03 დოკუმენტით");
+});
+await t("card: include_related=false → document_movement ცარიელი, მეთოდი არ გამოიძახება", async () => {
+  const before = state.calls.filter((c) => c === "ListTaskRelatedDocumentByDocument").length;
+  const r = await edoc.taskCard({ target: "t1", includeHistory: false, includeRelated: false });
+  assert.deepEqual(r.document_movement, []); assert.equal(state.calls.filter((c) => c === "ListTaskRelatedDocumentByDocument").length, before);
+});
+await t("guide: GUIDE.md == core/guide.js და შიგ არის დავალების შექმნის ნაბიჯები", async () => {
+  const { GUIDE } = await import("../core/guide.js");
+  const md = fs.readFileSync(new URL("../GUIDE.md", import.meta.url), "utf8");
+  assert.equal(GUIDE, md, "core/guide.js ძველია — გაუშვი node .tests/build-guide.mjs");
+  assert.ok(GUIDE.includes("edoc_create_task") && GUIDE.includes("confirm: false") && GUIDE.includes("document_movement"));
+});
 await t("card: უცნობი ნომერი → უარი", async () => { assert.equal((await edoc.taskCard({ target: "999999" })).ok, false); });
 const dl = fs.mkdtempSync(path.join(os.tmpdir(), "edoc-dl-"));
 await t("download: file_ids, kind=auto (document + working), docx-ის ტექსტი", async () => {
