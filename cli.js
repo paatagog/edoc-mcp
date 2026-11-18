@@ -9,6 +9,8 @@
 //   node cli.js sign <ნომერი|id|სათაური> [--comment "..."] [--confirm]
 //   node cli.js ignore [list|add|remove] [vise|sign] [<ნომერი|id|სათაური>] [--reason "..."]
 //   node cli.js create --title "..." --to "გვარი [სახელი] [| თანამდებობა]" [--to ...] --file <main.docx> [--attach <file>]... [--vise "გვარი"]... [--confirm]
+//   node cli.js card <დავალების ნომერი|id> [--no-history]
+//   node cli.js download <დავალების ნომერი> [--source all|documents|working] [--main] [--dir <საქაღალდე>] | download --id <ფაილის id> [--id ...]
 //   node cli.js vpn
 //   node cli.js discover <regex>
 //
@@ -21,7 +23,7 @@ const argv = process.argv.slice(2);
 const cmd = argv[0];
 const flag = (f) => argv.includes(f);
 const opt = (f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : undefined; };
-const VALUED = ["--comment", "--reason", "--title", "--to", "--file", "--attach", "--signer-position", "--vise"];
+const VALUED = ["--comment", "--reason", "--title", "--to", "--file", "--attach", "--signer-position", "--vise", "--id", "--dir", "--source", "--kind"];
 const pos = argv.slice(1).filter((a, i, all) => !a.startsWith("--") && !VALUED.includes(all[i - 1]));
 const opts = (f) => argv.flatMap((a, i) => (a === f && argv[i + 1] !== undefined ? [argv[i + 1]] : []));
 const num = (d) => (pos[0] && /^\d+$/.test(pos[0]) ? Number(pos[0]) : d);
@@ -70,6 +72,8 @@ const commands = {
     }
     return edoc.createTask({ ...a, confirm: true });
   },
+  card: () => edoc.taskCard({ target: pos[0], includeHistory: !flag("--no-history") }),
+  download: () => edoc.download({ fileIds: opts("--id"), task: pos[0], kind: opt("--kind") || "auto", source: opt("--source") || "auto", onlyMain: flag("--main"), dir: opt("--dir") }),
   vpn: () => edoc.vpn(),
   discover: () => edoc.discover(pos[0] || "Vise", { skipJs: true }),
 };

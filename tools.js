@@ -4,7 +4,7 @@
 import { createEdoc } from "./core/edoc.js";
 import { defaultIgnoreFile } from "./core/ignore.js";
 
-export const VERSION = "3.3.0";
+export const VERSION = "3.4.0";
 
 const edoc = createEdoc({
   base: process.env.EDOC_BASE_URL,
@@ -22,6 +22,7 @@ const wrap = (fn) => async (args) => {
   catch (e) { return text({ error: e.message, ...(e.data ? { data: e.data } : {}) }, true); }
 };
 const RO = { readOnlyHint: true, openWorldHint: true };
+const LOCAL_WRITE = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true };
 const DESTRUCTIVE = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true };
 
 export default function defineTools({ z }) {
@@ -166,6 +167,45 @@ export default function defineTools({ z }) {
       },
       handler: wrap(({ title, addressees, files, vise_authors, sign_block, signer, signer_position, deadline_days, comment, confirm }) =>
         edoc.createTask({ title, addressees, files, viseAuthors: vise_authors, signBlock: sign_block, signer, signerPosition: signer_position, deadlineDays: deadline_days, comment, confirm })),
+    },
+    {
+      name: "edoc_task_card",
+      config: {
+        title: "იდოკი — დავალების ბარათი (ვინ ვის გადააწერა, ვიზები, კომენტარები)",
+        description: "Full card of ONE eDocument task by task number or id (received or sent, also tasks seen only as a visa/signature request): " +
+          "assignments — who forwarded (გადააწერა) the task to whom, when, with what text/comment and current status, as a flat list plus the nested tree " +
+          "(responsibles_tree, with each person's status history); vises — every visa author per working folder with status, dates, who requested it, comments and " +
+          "status history (who vised when); signatures — signatories with status/history; folders — working folders (memo drafts) with their files; documents — " +
+          "registered documents with files and chancellery comments; task_files. File ids can be passed to edoc_download. Read-only.",
+        inputSchema: {
+          target: z.string().min(1).describe("დავალების ნომერი (მაგ. 53163) ან id"),
+          include_history: z.boolean().default(true).describe("თითო ადრესატის/ვიზიორის/ხელმომწერის სტატუსების ისტორია (უფრო ნელია)"),
+        },
+        annotations: RO,
+      },
+      handler: wrap(({ target, include_history }) => edoc.taskCard({ target, includeHistory: include_history })),
+    },
+    {
+      name: "edoc_download",
+      config: {
+        title: "იდოკი — ფაილების გადმოწერა და დათვალიერება",
+        description: "Downloads eDocument files to this computer (default folder: Downloads\\edoc\\<task number>) and returns their paths. Either file_ids " +
+          "(ids from edoc_task_card or edoc_list_tasks include_details) or task (task number/id → all its files: by default the registered document's files, " +
+          "or the working-folder files if the task has no registered document yet; source=all for everything). Text of Word .docx and plain-text files is " +
+          "returned inline (text); PDFs and others are only saved — read them from the returned path. Changes nothing in eDocument.",
+        inputSchema: {
+          file_ids: z.array(z.string().min(1)).default([]).describe("ფაილების id-ები"),
+          task: z.string().optional().describe("დავალების ნომერი ან id — მისი ყველა ფაილი"),
+          kind: z.enum(["auto", "document", "working", "task"]).default("auto").describe("file_ids-ის წყარო: document = რეგისტრირებული დოკუმენტი, working = სამუშაო საქაღალდე, task = დავალების ფაილი"),
+          source: z.enum(["auto", "documents", "working", "all"]).default("auto").describe("task-ისთვის: რომელი ფაილები"),
+          only_main: z.boolean().default(false).describe("task-ისთვის: მხოლოდ დედანი/ძირითადი"),
+          dir: z.string().optional().describe("შესანახი საქაღალდე (ნაგულისხმევად Downloads\\edoc)"),
+          extract_text: z.boolean().default(true).describe("Word-ის (.docx) ტექსტის დაბრუნება პასუხში"),
+        },
+        annotations: LOCAL_WRITE,
+      },
+      handler: wrap(({ file_ids, task, kind, source, only_main, dir, extract_text }) =>
+        edoc.download({ fileIds: file_ids, task, kind, source, onlyMain: only_main, dir, extract: extract_text })),
     },
     {
       name: "vpn_connect",

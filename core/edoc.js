@@ -7,6 +7,8 @@ import { ensureVpn, edocReachable } from "./vpn.js";
 import { createIgnoreStore } from "./ignore.js";
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
+import zlib from "node:zlib";
 import { randomUUID } from "node:crypto";
 
 export class EdocError extends Error {
@@ -253,7 +255,7 @@ export function createEdoc(cfg = {}) {
   const safe = async (label, f) => { try { return await f(); } catch (e) { errs.push(`${label}: ${e.message}`); return null; } };
 
   const files = await safe("ListTaskFiles", () => call("ListTaskFiles", { taskID: raw.ID }));
-  det.task_files = (files?.Items || []).map((f) => ({ id: f.ID, name: clean(f.FileName || f.FullName), comments: clean(f.Comments) }));
+  det.task_files = (files?.Items || []).map((f) => ({ id: f.ID, name: clean(f.FileName || f.FullName), comments: clean(f.Comments), source: "task" }));
 
   const hist = await safe("ListStatusHistoryForTask", () => call("ListStatusHistoryForTask", { taskID: raw.ID }));
   det.history = (hist?.Items || []).map((h) => ({
@@ -268,8 +270,10 @@ export function createEdoc(cfg = {}) {
     const tn = DOC_TYPES[rd.DocumentType];
     const doc = { id: rd.DocumentID, type: tn ? { code: rd.DocumentType, name: tn[0], label: tn[1] } : { code: rd.DocumentType } };
     if (tn) {
-      const info = await safe(`Get${tn[0]}DocumentInfoForUser`, () =>
-        call(`Get${tn[0]}DocumentInfoForUser`, { documentID: rd.DocumentID, taskID: raw.ID, responsibleID: raw.ResponsibleID }));
+      // ResponsibleID მხოლოდ საკუთარი დავალებებისთვისაა; სხვა შემთხვევაში (მაგ. მხოლოდ ვიზირებისას) — ბარათის მეთოდი
+      const info = raw.ResponsibleID
+        ? await safe(`Get${tn[0]}DocumentInfoForUser`, () => call(`Get${tn[0]}DocumentInfoForUser`, { documentID: rd.DocumentID, taskID: raw.ID, responsibleID: raw.ResponsibleID }))
+        : await safe(`Get${tn[0]}DocumentForCard`, () => call(`Get${tn[0]}DocumentForCard`, { id: rd.DocumentID }));
       const d = info?.Item;
       if (d) Object.assign(doc, {
         number: d.MaskedNumber || d.Number || null,
@@ -290,8 +294,11 @@ export function createEdoc(cfg = {}) {
     }
     const fl = await safe("ListFilesForDocument", () => call("ListFilesForDocument", { documentID: rd.DocumentID, documentType: rd.DocumentType, fileType: null }));
     doc.files = (fl?.Items || []).map((f) => ({
-      id: f.ID, name: clean(f.FileName || f.FullName), kind: clean(f.FileTypeCaption), mime: f.Extension || null, comments: clean(f.Comments),
+      id: f.ID, name: clean(f.FileName || f.FullName), kind: clean(f.FileTypeCaption), mime: f.Extension || null, comments: clean(f.Comments), source: "document",
     }));
+    const dc = await safe("ListDocumentCommentsForCard", () => call("ListDocumentCommentsForCard", { documentID: rd.DocumentID, documentType: rd.DocumentType }));
+    const cm = (dc?.Items || []).filter((c) => !c.IsDeleted).map((c) => ({ date: wcfDate(c.CreateDate), by: clean(c.Author), text: clean(c.Text) }));
+    if (cm.length) doc.document_comments = cm;
     det.documents.push(doc);
   }
   if (errs.length) det.errors = errs;
@@ -676,6 +683,228 @@ export function createEdoc(cfg = {}) {
         : "ხელმოსაწერებში ჯერ არ ჩანს — შეამოწმე edoc_list_signs-ით ცოტა ხანში ან იდოკში." };
   }
 
+
+  // ---------- დავალების ბარათი: ვინ ვის გადააწერა, ვიზები, ხელმოწერები, კომენტარები, ფაილები ----------
+  // მეთოდები (გამოცდილია რეალურ იდოკზე 2026-11-18): GetTaskForCard, ListResponsiblesByTaskForCard (ხე: ChildResponsibles),
+  // ListStatusHistoryForResponsible, ListFoldersForCard (+Files), ListViseAuthorsForCard, ListTaskViseAuthorsStatusVersions,
+  // ListSignaturesForCard, ListTaskSignatoryStatusHistory, ListDocumentCommentsForCard.
+  const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const st = (c) => (c == null ? null : { code: c, label: STATUS[c]?.[1] || `სტატუსი ${c}` });
+  const nm = (...a) => clean(a.filter(Boolean).join(" ")) || null;
+  const WD_TYPE = { 1: "ძირითადი", 2: "დანართი", 3: "სამუშაო" };
+
+  // დავალების ნომერი / id → { id, raw } (raw — ListTasksForRegistry-ის ჩანაწერი, თუ მოიძებნა; საჭიროა დოკუმენტის ინფოსთვის)
+  async function findTask(target) {
+    const k = String(target ?? "").trim();
+    if (!k) return { error: "მიუთითე დავალების ნომერი ან id" };
+    const s = await me();
+    const hit = (t) => t.ID === k || t.NumberMasked === k || String(t.Number) === k;
+    for (const d of [2, 1]) {
+      const r = await call("ListTasksForRegistry", { employeeID: s.employeeID, positionIDs: s.positionIDs, direction: d,
+        startDateFrom: null, startDateTo: null, filterExtendedText: null, filterID: null });
+      const m = (r.Items || []).filter(hit);
+      if (m.length) return { id: m[0].ID, raw: m[0] };
+    }
+    for (const fn of [visesRaw, signsRaw]) for (const d of ["received", "sent"]) {
+      const v = (await fn(d)).find((x) => x.TaskID && (x.TaskID === k || x.TaskNumberMasked === k || String(x.TaskNumber) === k));
+      if (v) return { id: v.TaskID, raw: null };
+    }
+    if (GUID.test(k)) return { id: k, raw: null };
+    return { error: `დავალება „${k}“ ვერ მოიძებნა (არც მიღებულებში, არც გაცემულებში, არც ვიზებსა და ხელმოწერებში)` };
+  }
+
+  async function taskCard({ target, includeHistory = true } = {}) {
+    const f = await findTask(target);
+    if (f.error) return { ok: false, error: f.error };
+    const taskID = f.id;
+    const errs = [];
+    const safe = async (label, fn) => { try { return await fn(); } catch (e) { errs.push(`${label}: ${e.message}`); return null; } };
+
+    const tc = (await safe("GetTaskForCard", () => call("GetTaskForCard", { taskID })))?.Item || {};
+    const task = { id: taskID, number: tc.NumberMasked || (tc.Number != null ? String(tc.Number) : f.raw?.NumberMasked || null),
+      text: clean(tc.TaskText ?? f.raw?.TaskText), created_by: clean(tc.Creator || f.raw?.CreatorInfo),
+      started_at: wcfDate(tc.StartDate), deadline: wcfDate(tc.DeadlineDate), status: st(tc.CurrentStatus ?? f.raw?.CurrentStatus),
+      comments: clean(tc.Comments) };
+
+    // 1) ვინ ვის გადააწერა — ხე და ბრტყელი სია
+    const rs = (await safe("ListResponsiblesByTaskForCard", () => call("ListResponsiblesByTaskForCard", { taskID })))?.Items || [];
+    const byEmp = new Map();
+    (function walk(a) { for (const n of a || []) { if (n.ResponsibleEmployeeID) byEmp.set(n.ResponsibleEmployeeID, nm(n.ResponsibleLastName, n.ResponsibleFirstName)); walk(n.ChildResponsibles); } })(rs);
+    const assignments = [];
+    const shapeResp = (n, parent, depth) => {
+      const who = nm(n.ResponsibleLastName, n.ResponsibleFirstName) || clean(n.ResponsibleInfo);
+      const from = parent ? (n.CreatorEmployeeID && n.CreatorEmployeeID !== parent.emp ? byEmp.get(n.CreatorEmployeeID) || n.CreatorEmployeeID : parent.name) : (byEmp.get(n.CreatorEmployeeID) || task.created_by);
+      const o = { depth: 0, responsible_id: n.ResponsibleID, to: who, position: clean(n.ResponsiblePosition), from: from || null,
+        text: clean(n.TaskText), comments: clean(n.Comments || n.CurrentStatusComments || n.StatusComments),
+        assigned_at: wcfDate(n.StartDate), deadline: wcfDate(n.DeadlineDate), status: st(n.Status ?? n.CurrentStatus)?.label, status_changed_at: wcfDate(n.StatusChangedDate),
+        is_me: n.ResponsibleEmployeeID === session.employeeID };
+      o.depth = depth;
+      assignments.push(o);
+      (n.ChildResponsibles || []).forEach((c) => shapeResp(c, { emp: n.ResponsibleEmployeeID, name: who }, depth + 1));
+      return o;
+    };
+    rs.forEach((n) => shapeResp(n, null, 0));
+    if (includeHistory) {
+      await mapLimit(assignments.slice(0, 40), 4, async (o) => {
+        const h = await safe("ListStatusHistoryForResponsible", () => call("ListStatusHistoryForResponsible", { taskID, responsibleID: o.responsible_id }));
+        const hist = (h?.Items || []).map((x) => ({ date: wcfDate(x.CreateDate), by: nm(x.CreatorLastName, x.CreatorFirstName), status: st(x.Status)?.label,
+          comments: clean(x.Comments || x.CurrentStatusComments || x.StatusComments) })).sort((a, b) => String(a.date).localeCompare(String(b.date)));
+        if (hist.length) o.history = hist;
+      });
+    }
+    assignments.sort((a, b) => String(a.assigned_at).localeCompare(String(b.assigned_at)));
+
+    // 2) სამუშაო საქაღალდეები (მოხსენებითი/პასუხი) და მათი ფაილები
+    const fl = (await safe("ListFoldersForCard", () => call("ListFoldersForCard", { taskID, folderID: null })))?.Items || [];
+    const folders = fl.map((x) => ({ folder_id: x.ID, name: clean(x.FolderName || x.Name), status: st(x.Status)?.label, status_comment: clean(x.StatusComment || x.StatusComments),
+      recipients: clean(x.RecipientsMasked), created_by: clean(x.Creator),
+      files: (x.Files || []).map((d) => ({ id: d.ID, name: clean(d.DocumentName), kind: WD_TYPE[d.TaskWorkingDocumentType] || null, size: clean(d.FileSizeString), source: "working" })) }));
+
+    // 3) ვიზები: ვინ, როდის, რა სტატუსით, კომენტარი (+ სტატუსების ისტორია)
+    const vf = (await safe("ListViseAuthorsForCard", () => call("ListViseAuthorsForCard", { taskID })))?.Items || [];
+    const vises = [];
+    const walkV = (a, folder, level) => { for (const v of a || []) {
+      vises.push({ id: v.ID, folder: folder, level, author: nm(v.AuthorLastName, v.AuthorFirstName) || clean(v.AuthorInfo), position: clean(v.AuthorPosition),
+        status: st(v.CurrentStatus)?.label, status_code: v.CurrentStatus, status_changed_at: wcfDate(v.StatusChangedDate), requested_at: wcfDate(v.EntryDate), deadline: wcfDate(v.Deadline),
+        requested_by: clean(v.CreatorInfo) || nm(v.CreatorLastName, v.CreatorFirstName) || byEmp.get(v.CreatorEmployeeID) || null,
+        comments: clean(v.Comments || v.CurrentStatusComments) });
+      walkV(v.ChildAuthors, folder, level + 1);
+    } };
+    for (const x of vf) walkV(x.ViseAuthors, clean(x.FolderName), 1);
+    // 4) ხელმოწერები
+    const sf = (await safe("ListSignaturesForCard", () => call("ListSignaturesForCard", { taskID })))?.Items || [];
+    const signatures = [];
+    for (const x of sf) for (const g of x.Signatories || []) signatures.push({ id: g.ID, folder: clean(x.FolderName),
+      signer: nm(g.SignatoryLastName, g.SignatoryFirstName) || clean(g.SignatoryInfo), position: clean(g.SignatoryPosition),
+      status: st(g.CurrentStatus)?.label, status_code: g.CurrentStatus, status_changed_at: wcfDate(g.StatusChangedDate), requested_at: wcfDate(g.EntryDate),
+      blocked: SIGN_BLOCK[g.BlockedState] || null, esign: g.eSignStatus && g.eSignStatus !== 1 ? ESIGN[g.eSignStatus] || g.eSignStatus : null,
+      comments: clean(g.Comments || g.CurrentStatusComments) });
+    if (includeHistory) {
+      const vn = (await mapLimit(vises.slice(0, 30), 4, async (v) => {
+        const h = await safe("ListTaskViseAuthorsStatusVersions", () => call("ListTaskViseAuthorsStatusVersions", { viseAuthorID: v.id }));
+        return (h?.Items || []).map((x) => ({ date: wcfDate(x.StatusChangedDate || x.CreateDate), by: clean(x.CreatorName) || nm(x.CreatorLastName, x.CreatorFirstName),
+          status: st(x.CurrentStatus ?? x.Status)?.label, comments: clean(x.Comments || x.CurrentStatusComments) })).sort((a, b) => String(a.date).localeCompare(String(b.date)));
+      }));
+      vises.forEach((v, i) => { if (vn[i]?.length) v.history = vn[i]; });
+      const sn = await mapLimit(signatures.slice(0, 20), 4, async (g) => {
+        const h = await safe("ListTaskSignatoryStatusHistory", () => call("ListTaskSignatoryStatusHistory", { signatoryID: g.id }));
+        return (h?.Items || []).map((x) => ({ date: wcfDate(x.StatusChangedDate || x.CreateDate), by: clean(x.CreatorName) || nm(x.CreatorLastName, x.CreatorFirstName),
+          status: st(x.CurrentStatus ?? x.Status)?.label, comments: clean(x.Comments || x.CurrentStatusComments) })).sort((a, b) => String(a.date).localeCompare(String(b.date)));
+      });
+      signatures.forEach((g, i) => { if (sn[i]?.length) g.history = sn[i]; });
+    }
+
+    // 5) რეგისტრირებული დოკუმენტები (ფაილები, კომენტარები) და დავალების ფაილები
+    const det = await taskDetails({ ID: taskID, ResponsibleID: f.raw?.ResponsibleID || null });
+    if (det.errors) errs.push(...det.errors);
+    const out = { ok: true, task, assignments, vises, signatures, folders, documents: det.documents, task_files: det.task_files,
+      status_history: det.history,
+      note: "ფაილის გადმოსაწერად: edoc_download file_id=<id> (ან task=<ნომერი> ყველა ფაილისთვის)." };
+    if (errs.length) out.errors = errs;
+    return out;
+  }
+
+  // ---------- ფაილების გადმოწერა ----------
+  // GetDocumentFile(id) → Item.Content; GetTaskWorkingDocument(id) → Item.DocumentFile; GetTaskFile(id) → Item.Content|File.
+  // შიგთავსი მოდის ბაიტების JSON მასივად (ან base64 სტრიქონად). გამოცდილია 2026-11-18 (3307-02 PDF, 5146-35.pdf).
+  const FILE_SRC = {
+    document: { m: "GetDocumentFile", bytes: (i) => i.Content, name: (i) => i.DocumentFileName || i.FullName, mime: (i) => i.Extension },
+    working: { m: "GetTaskWorkingDocument", bytes: (i) => i.DocumentFile, name: (i) => i.DocumentName, mime: (i) => i.DocumentContentType },
+    task: { m: "GetTaskFile", bytes: (i) => i.Content || i.File || i.FileContent, name: (i) => i.FileName || i.FullName, mime: (i) => i.MimeType || i.Extension },
+  };
+  const toBuf = (x) => (Array.isArray(x) ? Buffer.from(x) : typeof x === "string" && x ? Buffer.from(x, "base64") : null);
+  const safeName = (n) => (String(n || "file").replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_").replace(/[. ]+$/, "").slice(0, 150) || "file");
+  const defaultDir = () => cfg.downloadDir || process.env.EDOC_DOWNLOAD_DIR || path.join(os.homedir(), "Downloads", "edoc");
+
+  async function post1(method, params) { // ხელახალი შესვლის გარეშე — kind=auto-ს ცდებისთვის
+    await me();
+    const r = await post(method, { credential: session.credential, ...params });
+    return r && r.IsSucceeded !== false ? r : null;
+  }
+  async function fetchFile(id, kind = "auto") {
+    const kinds = kind === "auto" ? ["document", "working", "task"] : [kind];
+    for (let attempt = 0; attempt < 2; attempt++) {
+      for (const k of kinds) {
+        const S = FILE_SRC[k]; if (!S) throw new EdocError(`უცნობი kind: ${k}`);
+        const r = kinds.length === 1 ? await call(S.m, { id }) : await post1(S.m, { id });
+        const it = r?.Item; const b = it && toBuf(S.bytes(it));
+        if (b) return { source: k, name: S.name(it) || id, mime: S.mime(it) || null, buf: b };
+      }
+      if (kinds.length === 1) break;
+      session = null; // შესაძლოა სესიის ვადა გავიდა — ერთხელ თავიდან
+    }
+    return null;
+  }
+
+  // docx/xlsx/pptx — მინიმალური zip-ის წამკითხველი (Node-ის zlib), ტექსტის ამოსაღებად
+  function unzipEntry(buf, want) {
+    let e = buf.length - 22; while (e >= 0 && buf.readUInt32LE(e) !== 0x06054b50) e--;
+    if (e < 0) return null;
+    let p = buf.readUInt32LE(e + 16); const n = buf.readUInt16LE(e + 10);
+    for (let i = 0; i < n; i++) {
+      if (buf.readUInt32LE(p) !== 0x02014b50) return null;
+      const method = buf.readUInt16LE(p + 10), csize = buf.readUInt32LE(p + 20), nl = buf.readUInt16LE(p + 28), xl = buf.readUInt16LE(p + 30), cl = buf.readUInt16LE(p + 32);
+      const off = buf.readUInt32LE(p + 42), name = buf.slice(p + 46, p + 46 + nl).toString("utf8");
+      if (want.test(name)) {
+        const ds = off + 30 + buf.readUInt16LE(off + 26) + buf.readUInt16LE(off + 28);
+        const data = buf.slice(ds, ds + csize);
+        return method === 8 ? zlib.inflateRawSync(data) : data;
+      }
+      p += 46 + nl + xl + cl;
+    }
+    return null;
+  }
+  const xmlText = (x) => x.replace(/<w:tab\/>/g, "\t").replace(/<\/w:p>/g, "\n").replace(/<w:br[^>]*\/>/g, "\n").replace(/<[^>]+>/g, "")
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, "&").replace(/\n{3,}/g, "\n\n").trim();
+  function extractText(name, buf) {
+    try {
+      if (/\.docx$/i.test(name)) { const x = unzipEntry(buf, /^word\/document\.xml$/); return x ? xmlText(x.toString("utf8")) : null; }
+      if (/\.(txt|csv|md|json|xml|html?)$/i.test(name)) return buf.toString("utf8");
+    } catch { return null; }
+    return null;
+  }
+
+  /**
+   * ფაილ(ებ)ის გადმოწერა კომპიუტერზე.
+   * fileIds — კონკრეტული ფაილები (ID-ები edoc_task_card / edoc_list_tasks include_details-იდან);
+   * task — დავალების ნომერი/id: მისი ყველა ფაილი (source: auto = რეგისტრირებული დოკუმენტის ფაილები, თუ არის, თორემ სამუშაო საქაღალდისა).
+   */
+  async function download({ fileIds = [], task, kind = "auto", source = "auto", onlyMain = false, dir, extract = true, maxText = 20000 } = {}) {
+    let list = (fileIds || []).map((id) => ({ id, source: kind }));
+    let sub = "files";
+    if (task) {
+      const card = await taskCard({ target: task, includeHistory: false });
+      if (!card.ok) return card;
+      sub = safeName(card.task.number || card.task.id);
+      const docF = card.documents.flatMap((d) => (d.files || []).map((x) => ({ id: x.id, source: "document", kindLabel: x.kind, doc: d.number })));
+      const wrkF = card.folders.flatMap((d) => d.files.map((x) => ({ id: x.id, source: "working", kindLabel: x.kind })));
+      const tskF = card.task_files.map((x) => ({ id: x.id, source: "task" }));
+      const pick = source === "documents" ? docF : source === "working" ? [...wrkF, ...tskF] : source === "all" ? [...docF, ...wrkF, ...tskF] : (docF.length ? [...docF, ...tskF] : [...wrkF, ...tskF]);
+      list = [...list, ...(onlyMain ? pick.filter((x) => /დედანი|ძირითადი/.test(x.kindLabel || "")) : pick)];
+    }
+    list = [...new Map(list.map((x) => [x.id, x])).values()];
+    if (!list.length) return { ok: false, error: task ? "დავალებას ფაილები არ აქვს" : "მიუთითე file_ids ან task" };
+    if (list.length > 40) return { ok: false, error: `ძალიან ბევრი ფაილია (${list.length}) — დააზუსტე file_ids ან source` };
+    const outDir = path.join(dir || defaultDir(), sub);
+    fs.mkdirSync(outDir, { recursive: true });
+    const saved = [], failed = [];
+    for (const it of list) {
+      try {
+        const f = await fetchFile(it.id, it.source || "auto");
+        if (!f) { failed.push({ id: it.id, error: "ფაილი ვერ მოიძებნა / შიგთავსი ცარიელია" }); continue; }
+        let base = safeName(f.name), fp = path.join(outDir, base), i = 2;
+        const ext = path.extname(base), stem = base.slice(0, base.length - ext.length);
+        while (fs.existsSync(fp) && fs.statSync(fp).size !== f.buf.length) fp = path.join(outDir, `${stem} (${i++})${ext}`);
+        fs.writeFileSync(fp, f.buf);
+        const o = { id: it.id, name: f.name, path: fp, bytes: f.buf.length, mime: f.mime, source: f.source, ...(it.doc ? { document: it.doc } : {}), ...(it.kindLabel ? { kind: it.kindLabel } : {}) };
+        if (extract) { const t = extractText(f.name, f.buf); if (t != null) { o.text = t.slice(0, maxText); if (t.length > maxText) o.text_truncated = t.length; } }
+        saved.push(o);
+      } catch (e) { failed.push({ id: it.id, error: e.message }); }
+    }
+    return { ok: saved.length > 0, folder: outDir, saved, ...(failed.length ? { failed } : {}),
+      note: "ფაილები შენახულია კომპიუტერზე. Word (.docx) ტექსტი პასუხშივეა; PDF-ის სანახავად Claude-მა ეს საქაღალდე უნდა გახსნას (ფაილის წაკითხვით)." };
+  }
+
   // ---------- დიაგნოსტიკა (მხოლოდ კითხულობს) ----------
   const wsdlCache = new Map();
   async function getText(url) {
@@ -749,6 +978,8 @@ export function createEdoc(cfg = {}) {
     sign: op((a) => guardedAction({ ...a, kind: "sign" })),
     ignore: op(ignore),
     createTask: op(createTask),
+    taskCard: op(taskCard),
+    download: op(download),
     ignoreFile: ign?.file || null,
     vpn: op(() => ensureVpn(HOST, { profile: VPN_PROFILE, base: BASE })),
     discover: op(discover),

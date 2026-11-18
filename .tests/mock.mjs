@@ -2,6 +2,16 @@
 import http from "node:http";
 const D = (ms) => `/Date(${ms}+0400)/`;
 const now = Date.UTC(2026, 10, 2, 12);
+// მინიმალური zip (stored) — ტესტის .docx-ისთვის
+export function makeZip(name, content) {
+  const nb = Buffer.from(name), data = Buffer.from(content);
+  const lh = Buffer.alloc(30); lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt32LE(data.length, 18); lh.writeUInt32LE(data.length, 22); lh.writeUInt16LE(nb.length, 26);
+  const cd = Buffer.alloc(46); cd.writeUInt32LE(0x02014b50, 0); cd.writeUInt32LE(data.length, 20); cd.writeUInt32LE(data.length, 24); cd.writeUInt16LE(nb.length, 28); cd.writeUInt32LE(0, 42);
+  const local = Buffer.concat([lh, nb, data]); const central = Buffer.concat([cd, nb]);
+  const end = Buffer.alloc(22); end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(1, 8); end.writeUInt16LE(1, 10); end.writeUInt32LE(central.length, 12); end.writeUInt32LE(local.length, 16);
+  return Buffer.concat([local, central, end]);
+}
+const DOCX = makeZip("word/document.xml", "<w:document><w:body><w:p><w:r><w:t>მოხსენებითი ბარათი</w:t></w:r></w:p><w:p><w:r><w:t>გთხოვთ &amp; განიხილოთ</w:t></w:r></w:p></w:body></w:document>");
 export function startMock(port) {
   const state = {
     tasks: [
@@ -44,6 +54,7 @@ export function startMock(port) {
     ListTaskFiles: () => ok({ Items: [{ ID: "fa", FileName: "a.pdf" }] }),
     ListStatusHistoryForTask: () => ok({ Items: [{ CreateDate: D(now), CreatorLastName: "X", Status: 2 }] }),
     ListRelatedDocumentsForTask: () => ok({ Items: [{ DocumentID: "d1", DocumentType: 3 }] }),
+    GetInternalDocumentForCard: () => ok({ Item: { MaskedNumber: "35/2" } }),
     GetInternalDocumentInfoForUser: () => ok({ Item: { MaskedNumber: "35/1", Annotation: "ანოტაცია" } }),
     ListEmployeesForUser: (b) => ok({ Items: state.emps.filter((e) => e.EmployeeLastName.startsWith(b.prefix)) }),
     saveTask: (b) => { state.created.push({ task: b }); return ok({ ResultTask: { ID: "NT", RootID: "NT", Number: 60001 } }); },
@@ -54,7 +65,22 @@ export function startMock(port) {
     SaveTaskSignatoryChanges: (b) => { state.created.push({ signers: b.signatures }); const g = b.signatures[0];
       state.signs.unshift({ ID: "ns", TaskID: b.taskID, FolderID: g.FolderID, TaskNumber: 60001, TaskNumberMasked: "60001", FolderName: "ახალი", CurrentStatus: 1, BlockedState: 1, eSignStatus: 1, EntryDate: D(now + 5) });
       return ok({ Items: [{ ...g, SaveResult: true }] }); },
-    ListFilesForDocument: () => ok({ Items: [{ ID: "df", FileName: "doc.pdf" }] }),
+    ListFilesForDocument: () => ok({ Items: [{ ID: "df", FileName: "doc.pdf", FileTypeCaption: "დედანი" }] }),
+    ListDocumentCommentsForCard: () => ok({ Items: [{ Text: "agil@iliauni.edu.ge", Author: "გურგენიძე ანა", CreateDate: D(now), IsDeleted: false }] }),
+    GetTaskForCard: (b) => ok({ Item: { ID: b.taskID, Number: 53163, NumberMasked: "53163", Creator: "კანცელარია", TaskText: "განცხადება", CurrentStatus: 1 } }),
+    ListResponsiblesByTaskForCard: () => ok({ Items: [{ ResponsibleID: "R0", ResponsibleEmployeeID: "DOB", ResponsibleLastName: "დობორჯგინიძე", ResponsibleFirstName: "ნინო", ResponsiblePosition: "რექტორი", Status: 3, StartDate: D(now),
+      ChildResponsibles: [
+        { ResponsibleID: "R1", ResponsibleEmployeeID: "KAV", ResponsibleLastName: "ყაველაშვილი", ResponsibleFirstName: "ნიკოლოზ", Status: 3, StartDate: D(now + 1000), TaskText: "გთხოვთ, განიხილოთ", CreatorEmployeeID: "DOB",
+          ChildResponsibles: [{ ResponsibleID: "R2", ResponsibleEmployeeID: "E", ResponsibleLastName: "გოგიშვილი", ResponsibleFirstName: "პაატა", Status: 2, StartDate: D(now + 2000), CreatorEmployeeID: "KAV" }] }] }] }),
+    ListStatusHistoryForResponsible: (b) => ok({ Items: b.responsibleID === "R1" ? [{ Status: 3, CreatorLastName: "ყაველაშვილი", CreatorFirstName: "ნიკოლოზ", CreateDate: D(now + 3000), Comments: "გადაწერა" }, { Status: 1, CreatorLastName: "დობორჯგინიძე", CreateDate: D(now + 1000) }] : [] }),
+    ListFoldersForCard: () => ok({ Items: [{ ID: "F1", FolderName: "პასუხი", Status: 15, StatusComment: "გატარებულია N1-35", Files: [{ ID: "W1", DocumentName: "memo.docx", TaskWorkingDocumentType: 1, FileSizeString: "1 კბ." }] }] }),
+    ListViseAuthorsForCard: () => ok({ Items: [{ ID: "F1", FolderName: "პასუხი", ViseAuthors: [{ ID: "VA1", AuthorLastName: "გოგიშვილი", AuthorFirstName: "პაატა", CurrentStatus: 10, StatusChangedDate: D(now + 5000), EntryDate: D(now), CreatorEmployeeID: "KAV", Comments: "თანახმა ვარ" }] }] }),
+    ListTaskViseAuthorsStatusVersions: () => ok({ Items: [{ CurrentStatus: 10, StatusChangedDate: D(now + 5000), CreatorName: "გოგიშვილი პაატა" }, { CurrentStatus: 1, StatusChangedDate: D(now), CreatorName: "ლორთქიფანიძე გვანცა" }] }),
+    ListSignaturesForCard: () => ok({ Items: [{ ID: "F1", FolderName: "პასუხი", Signatories: [{ ID: "SG1", SignatoryLastName: "ლორთქიფანიძე", SignatoryFirstName: "გვანცა", CurrentStatus: 12, BlockedState: 1, eSignStatus: 1, EntryDate: D(now) }] }] }),
+    ListTaskSignatoryStatusHistory: () => ok({ Items: [] }),
+    GetDocumentFile: (b) => (b.id === "df" ? ok({ Item: { Content: [...Buffer.from("%PDF-1.7 test")], DocumentFileName: "doc.pdf", Extension: "application/pdf" } }) : { IsSucceeded: false, ErrorMessage: "not found" }),
+    GetTaskWorkingDocument: (b) => (b.id === "W1" ? ok({ Item: { DocumentFile: DOCX.toString("base64"), DocumentName: "memo.docx", DocumentContentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" } }) : { IsSucceeded: false, ErrorMessage: "not found" }),
+    GetTaskFile: (b) => (b.id === "fa" ? ok({ Item: { Content: [...Buffer.from("A")], FileName: "a.pdf" } }) : { IsSucceeded: false, ErrorMessage: "not found" }),
   };
   const srv = http.createServer((req, res) => {
     if (req.method === "GET") { res.end(req.url.includes("singleWsdl") ? '<xs:element name="ListViseAuthorsForUser"><xs:complexType><xs:sequence><xs:element name="credential" type="q:ClientCredential"/></xs:sequence>' : "<html></html>"); return; }

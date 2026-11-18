@@ -96,4 +96,44 @@ fs.rmSync(tmp, { recursive: true, force: true });
 await t("ცვლილების ბრძანებები მხოლოდ confirm-ით", async () => {
   assert.deepEqual(state.calls.filter((c) => c.startsWith("Change")), ["ChangeViseAuthorStatus", "ChangeSignatoryStatus"]);
 });
+// ---------- ბარათი და გადმოწერა (3.4.0) ----------
+await t("card: ვინ ვის გადააწერა (from → to, ტექსტი, ისტორია)", async () => {
+  const r = await edoc.taskCard({ target: "50563" });
+  assert.equal(r.ok, true, JSON.stringify(r)); assert.equal(r.task.number, "53163");
+  assert.deepEqual(r.assignments.map((a) => `${a.from}→${a.to}`), ["კანცელარია→დობორჯგინიძე ნინო", "დობორჯგინიძე ნინო→ყაველაშვილი ნიკოლოზ", "ყაველაშვილი ნიკოლოზ→გოგიშვილი პაატა"]);
+  assert.equal(r.assignments[1].text, "გთხოვთ, განიხილოთ"); assert.equal(r.assignments[1].status, "გადაწერილია");
+  assert.equal(r.assignments[1].history[1].comments, "გადაწერა"); assert.equal(r.assignments[1].depth, 1);
+  assert.equal(r.assignments[2].is_me, true); assert.equal(r.responsibles_tree, undefined);
+});
+await t("card: ვიზები, ხელმოწერები, საქაღალდეები, კომენტარები", async () => {
+  const r = await edoc.taskCard({ target: "t1" });
+  assert.equal(r.vises[0].author, "გოგიშვილი პაატა"); assert.equal(r.vises[0].status, "დავიზებულია"); assert.equal(r.vises[0].comments, "თანახმა ვარ");
+  assert.equal(r.vises[0].requested_by, "ყაველაშვილი ნიკოლოზ"); assert.equal(r.vises[0].history[0].by, "ლორთქიფანიძე გვანცა");
+  assert.equal(r.signatures[0].status, "ხელმოწერილია"); assert.equal(r.folders[0].status, "რეგისტრირებულია"); assert.equal(r.folders[0].files[0].source, "working");
+  assert.equal(r.documents[0].document_comments[0].by, "გურგენიძე ანა"); assert.equal(r.documents[0].files[0].source, "document");
+});
+await t("card: დავალება ვიზების სიიდან (tv1) → დოკუმენტი ბარათის მეთოდით", async () => {
+  const r = await edoc.taskCard({ target: "100" }); assert.equal(r.ok, true); assert.equal(r.task.id, "tv1");
+  assert.equal(r.documents[0].number, "35/2"); assert.equal(r.errors, undefined);
+});
+await t("card: უცნობი ნომერი → უარი", async () => { assert.equal((await edoc.taskCard({ target: "999999" })).ok, false); });
+const dl = fs.mkdtempSync(path.join(os.tmpdir(), "edoc-dl-"));
+await t("download: file_ids, kind=auto (document + working), docx-ის ტექსტი", async () => {
+  const r = await edoc.download({ fileIds: ["df", "W1"], dir: dl });
+  assert.equal(r.ok, true, JSON.stringify(r)); assert.equal(r.saved.length, 2);
+  assert.equal(fs.readFileSync(r.saved[0].path, "utf8"), "%PDF-1.7 test"); assert.equal(r.saved[0].source, "document");
+  assert.equal(r.saved[1].source, "working"); assert.ok(r.saved[1].text.includes("გთხოვთ & განიხილოთ")); assert.ok(r.saved[1].text.startsWith("მოხსენებითი"));
+});
+await t("download: task → დოკუმენტის ფაილები, ქვესაქაღალდე ნომრით; განმეორება არ აორმაგებს", async () => {
+  const r = await edoc.download({ task: "50563", dir: dl });
+  assert.equal(r.ok, true, JSON.stringify(r)); assert.ok(r.folder.endsWith("53163"));
+  assert.deepEqual(r.saved.map((x) => x.source).sort(), ["document", "task"]);
+  const r2 = await edoc.download({ task: "50563", dir: dl }); assert.equal(r2.saved[0].path, r.saved.find((x) => x.source === r2.saved[0].source).path);
+  const all = await edoc.download({ task: "50563", dir: dl, source: "all" }); assert.equal(all.saved.length, 3);
+});
+await t("download: უცნობი ფაილი → failed", async () => { const r = await edoc.download({ fileIds: ["nope"], dir: dl }); assert.equal(r.ok, false); assert.equal(r.failed.length, 1); });
+fs.rmSync(dl, { recursive: true, force: true });
+await t("ბარათი/გადმოწერა იდოკში არაფერს ცვლის", async () => {
+  assert.deepEqual(state.calls.filter((c) => /^(Change|Save|Create|Delete|save)/.test(c)).filter((c) => !["saveTask", "CreateTaskWorkingFolder", "CreateTaskWorkingFolderInternalContact", "SaveTaskSignatoryChanges", "saveViseAuthorChanges", "ChangeViseAuthorStatus", "ChangeSignatoryStatus"].includes(c)), []);
+});
 srv.close();
